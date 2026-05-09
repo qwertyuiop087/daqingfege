@@ -62,8 +62,9 @@ async def main():
     app.add_handler(CommandHandler("set", set_line))
     app.add_handler(CommandHandler("now", get_line))
     app.add_handler(MessageHandler(filters.Document.ALL, txt_split_handler))
-    await app.start_polling()
-    await app.idle()
+    
+    # 新版正确写法 run_polling
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
