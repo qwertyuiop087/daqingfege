@@ -4,11 +4,11 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 import os
 
 BOT_TOKEN = os.getenv("8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0")
-SEND_DELAY = 3.0  # 固定3秒间隔，不改
-user_line_setting = {}  # 每个用户单独保存分包行数
-DEFAULT_LINE = 80      # 默认每包80行
+SEND_DELAY = 3.0  # 固定3秒间隔
+user_line_setting = {}
+DEFAULT_LINE = 80
 
-# 设置每包行数 /set 数字
+# 设置每包行数
 async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
@@ -61,10 +61,13 @@ async def txt_split_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"✅ 分包全部完成！共 {len(packs)} 包")
 
 async def main():
-    app = ApplicationBuilder(BOT_TOKEN).build()
+    # 新版正确写法，修复参数报错
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("set", set_line))
     app.add_handler(CommandHandler("now", get_line))
     app.add_handler(MessageHandler(filters.Document.ALL, txt_split_handler))
+    
     await app.start_polling()
     await app.idle()
 
