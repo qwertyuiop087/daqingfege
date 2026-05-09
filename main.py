@@ -3,13 +3,14 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 环境变量读取
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SEND_DELAY = 3.0
 user_line_setting = {}
 DEFAULT_LINE = 80
 
-# 设置分包行数
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ 机器人正常运行\n/set 数字 设置每包行数\n/now 查看当前行数\n直接发送TXT自动分包")
+
 async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
@@ -22,13 +23,11 @@ async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("格式错误！用法：/set 50")
 
-# 查看当前设置
 async def now_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     now = user_line_setting.get(user_id, DEFAULT_LINE)
     await update.message.reply_text(f"📌 当前每包行数：{now}")
 
-# TXT分包核心
 async def split_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     doc = msg.document
@@ -59,16 +58,16 @@ async def split_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text(f"✅ 全部分包完成！共{len(packs)}包")
 
-# 修复循环崩溃专用启动方式
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_line))
     app.add_handler(CommandHandler("now", now_line))
     app.add_handler(MessageHandler(filters.Document.ALL, split_txt))
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
+
+    # 关键：接收所有消息，修复不响应
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     asyncio.run(main())
