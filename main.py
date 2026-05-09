@@ -444,7 +444,8 @@ def ins_done(m):
 
     chunk = [lines[i:i+u['line']] for i in range(0,total,u['line'])]
     media=[]
-    idx=1
+    file_idx=1
+    batch_num=1
     start=1
     ph_idx=0
     phones = info['phone']
@@ -452,8 +453,6 @@ def ins_done(m):
     for c in chunk:
         chunk_len = len(c)
         end = start + chunk_len -1
-        bot.send_message(m.chat.id,f"📤正在发送第{idx}批：{start}～{end}行")
-        start = end+1
 
         insert_pos_list = random.sample(range(1, chunk_len+1), info['num'])
         insert_pos_list.sort()
@@ -461,7 +460,7 @@ def ins_done(m):
         for pos in insert_pos_list:
             lei = phones[ph_idx % len(phones)]
             temp_list.insert(pos-1, lei)
-            csv_rows += f"{idx},{pos},{c[pos-1]},{lei}\n"
+            csv_rows += f"{file_idx},{pos},{c[pos-1]},{lei}\n"
             ph_idx += 1
         if u['mode']=="VCF":
             vcf = ""
@@ -469,17 +468,27 @@ def ins_done(m):
                 n=get_rand_3_name()
                 vcf+=f"BEGIN:VCARD\nVERSION:3.0\nN:{n};;;\nFN:{n}\nTEL:{p}\nEND:VCARD\n"
             bio=BytesIO(vcf.encode())
-            bio.name=f"{m.text}_{idx}.vcf"
+            bio.name=f"{m.text}_{file_idx}.vcf"
         else:
             bio=BytesIO("\n".join(temp_list).encode())
-            bio.name=f"{m.text}_{idx}.txt"
+            bio.name=f"{m.text}_{file_idx}.txt"
         media.append(InputMediaDocument(bio))
-        if len(media)>=BATCH_SIZE:
-            bot.send_media_group(uid=m.chat.id,media=media)
+
+        if len(media)>=10:
+            bot.send_message(cid,f"📤正在发送第{batch_num}批｜文件 {file_idx-9}～{file_idx}")
+            bot.send_media_group(cid,media)
             time.sleep(3)
             media=[]
-        idx+=1
-    if media:bot.send_media_group(m.chat.id,media)
+            batch_num+=1
+
+        start = end+1
+        file_idx+=1
+
+    if media:
+        last_start = file_idx - len(media)
+        bot.send_message(cid,f"📤正在发送第{batch_num}批｜文件 {last_start}～{file_idx-1}")
+        bot.send_media_group(cid,media)
+
     csv_bio=BytesIO(csv_rows.encode("utf-8-sig"))
     csv_bio.name="插雷明细.csv"
     bot.send_document(m.chat.id,csv_bio)
@@ -487,7 +496,7 @@ def ins_done(m):
     del user_file[uid]
     del user_insert[uid]
 
-# ========== 纯净分包 修复分段提示+结尾时间 ==========
+# ========== 纯净分包 10个文件一批 提示+结尾北京时间 ==========
 def split_send_clean(cid,uid,txt,name):
     lines=[x for x in txt.splitlines() if x]
     total=len(lines)
@@ -500,32 +509,40 @@ def split_send_clean(cid,uid,txt,name):
 
     chunk = [lines[i:i+u['line']] for i in range(0,total,u['line'])]
     media=[]
-    idx=1
-    start=1
-    for c in chunk:
-        end = start + len(c) -1
-        bot.send_message(cid,f"📤正在发送第{idx}批：{start}～{end}行")
-        start = end+1
+    file_idx=1
+    batch_num=1
 
+    for c in chunk:
         if u['mode']=="VCF":
             vcf=""
             for p in c:
                 n=get_rand_3_name()
                 vcf+=f"BEGIN:VCARD\nVERSION:3.0\nN:{n};;;\nFN:{n}\nTEL:{p}\nEND:VCARD\n"
             bio=BytesIO(vcf.encode())
-            bio.name=f"{name}_{idx}.vcf"
+            bio.name=f"{name}_{file_idx}.vcf"
         else:
             bio=BytesIO("\n".join(c).encode())
-            bio.name=f"{name}_{idx}.txt"
+            bio.name=f"{name}_{file_idx}.txt"
+
         media.append(InputMediaDocument(bio))
-        if len(media)>=BATCH_SIZE:
+
+        # 满10个文件发一批
+        if len(media)>=10:
+            bot.send_message(cid,f"📤正在发送第{batch_num}批｜文件 {file_idx-9}～{file_idx}")
             bot.send_media_group(cid,media)
             time.sleep(3)
             media=[]
-        idx+=1
-    if media:bot.send_media_group(cid,media)
-    
-    # 结尾补上北京时间
+            batch_num+=1
+
+        file_idx+=1
+
+    # 剩余不足10个收尾
+    if media:
+        last_start = file_idx - len(media)
+        bot.send_message(cid,f"📤正在发送第{batch_num}批｜文件 {last_start}～{file_idx-1}")
+        bot.send_media_group(cid,media)
+
+    # 结束显示北京时间
     bot.send_message(cid,f"✅纯净分包全部完成\n当前北京时间：{get_beijing_time_str()}")
     
     if uid in temp_split_data:del temp_split_data[uid]
