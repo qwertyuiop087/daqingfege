@@ -13,7 +13,7 @@ BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
 ADMIN_ID = 6042965834
 
 PRICE_SPLIT = 0.0004
-PRICE_INSERT = 0.0004
+PRICE_INSERT = 0.0001
 PRICE_MERGE = 0.0002
 PRICE_DEDUP = 0.0002
 BATCH_SIZE = 10
@@ -32,6 +32,7 @@ def get_rand_3_name():
 
 user_file = {}
 users = {}
+# 卡密格式：{卡密:{"money":金额,"expire_time":过期时间戳}}
 cards = {}
 user_merge = {}
 user_state = {}
@@ -60,6 +61,10 @@ def get_beijing_time_str():
     beijing_tz = timezone(timedelta(hours=8))
     beijing_now = datetime.now(beijing_tz)
     return beijing_now.strftime("%Y-%m-%d %H:%M:%S")
+
+# 获取当前时间戳
+def get_now_timestamp():
+    return int(time.time())
 
 # 清洗空白行
 def clean_empty_line(text):
@@ -122,13 +127,15 @@ def user_menu(uid):
     )
     return kb
 
-# 管理员后台
+# 管理员后台【新增作废卡密+导出卡密】
 def admin_kb():
     kb = telebot.types.InlineKeyboardMarkup(row_width=2)
     kb.add(telebot.types.InlineKeyboardButton("➕单人手动加余额",callback_data="addbal"),telebot.types.InlineKeyboardButton("➖单人扣余额",callback_data="subbal"))
     kb.add(telebot.types.InlineKeyboardButton("🎟️批量生成卡密",callback_data="card"),telebot.types.InlineKeyboardButton("📊全部用户余额总表",callback_data="ulist"))
-    kb.add(telebot.types.InlineKeyboardButton("📋全体用户充值总记录",callback_data="all_rc_log"),telebot.types.InlineKeyboardButton("📋全体用户消费总记录",callback_data="all_use_log"))
+    kb.add(telebot.types.InlineKeyboardButton("📋全体用户充值总记录",callback_data="all_rc_log"),telebot.types.InlineKeyboardButton("📋全体用户消费记录",callback_data="all_use_log"))
     kb.add(telebot.types.InlineKeyboardButton("📢全站广播",callback_data="broad"),telebot.types.InlineKeyboardButton("🔥批量加用户余额",callback_data="batch_addbal"))
+    kb.add(telebot.types.InlineKeyboardButton("🎫查看所有有效卡密",callback_data="check_all_cdk"))
+    kb.add(telebot.types.InlineKeyboardButton("🗑️作废指定卡密",callback_data="del_cdk"),telebot.types.InlineKeyboardButton("📤导出全部有效卡密",callback_data="export_cdk"))
     kb.add(telebot.types.InlineKeyboardButton("🔙返回",callback_data="back"))
     return kb
 
@@ -152,7 +159,7 @@ def s(m):
 def cancel_all(msg):
     uid = msg.from_user.id
     user_state[uid] = "idle"
-    user_merge[uid] = []
+    user_merge[uid] = ""
     if uid in user_insert: del user_insert[uid]
     if uid in user_file: del user_file[uid]
     bot.send_message(msg.chat.id,"✅已清空所有操作缓存，请重新上传文件")
@@ -210,9 +217,9 @@ def admin_cmd(msg):
         try:
             uid = int(txt.replace("查询用户消费记录","").strip())
             log = log_user.get(uid,["该用户暂无消费记录"])
-            bot.send_message(m.chat.id,f"📋 用户{uid} 消费明细\n"+"\n".join(log)[:4000])
+            bot.send_message(msg.chat.id,f"📋 用户{uid} 消费明细\n"+"\n".join(log)[:4000])
         except:
-            bot.send_message(m.chat.id,"❌格式：查询用户消费记录 用户ID")
+            bot.send_message(msg.chat.id,"❌格式：查询用户消费记录 用户ID")
 
 # 接收广播图片
 @bot.message_handler(content_types=['photo'])
@@ -239,7 +246,7 @@ def admin_broadcast(msg):
             send_count += 1
         except:
             continue
-    bot.send_message(m.chat.id,f"🎉全站广播全部结束\n成功送达总数：{send_count} 位用户")
+    bot.send_message(msg.chat.id,f"🎉全站广播全部结束\n成功送达总数：{send_count} 位用户")
     
     broad_img = None
     broad_text = ""
@@ -285,15 +292,41 @@ def cb(c):
         bot.send_message(cid,"🧹请发送需要去重的号码文件")
     elif d=="admin" and is_admin(uid):
         bot.edit_message_text("🔧管理员后台控制面板",cid,c.message.message_id,reply_markup=admin_kb())
-    elif d=="addbal" and is_admin(uid):
-        bot.send_message(cid,"➕请输入：用户ID 充值金额")
-        bot.register_next_step_handler(c.message, admin_add_balance)
-    elif d=="subbal" and is_admin(uid):
-        bot.send_message(cid,"➖请输入：用户ID 扣除金额")
-        bot.register_next_step_handler(c.message, admin_sub_balance)
-    elif d=="card" and is_admin(uid):
-        bot.send_message(cid,"🎟️请输入卡密面值")
-        bot.register_next_step_handler(c.message, make_card)
+
+    # ========== 新增：作废指定卡密 ==========
+    elif d=="del_cdk" and is_admin(uid):
+        bot.send_message(cid,"🗑️请发送要作废删除的完整卡密")
+        bot.register_next_step_handler(c.message, del_single_cdk)
+
+    # ========== 新增：导出全部有效卡密TXT ==========
+    elif d=="export_cdk" and is_admin(uid):
+        now = get_now_timestamp()
+        export_text = "卡密,面值(元),过期时间\n"
+        for cdk,info in cards.items():
+            if info['expire_time'] > now:
+                time_str = datetime.fromtimestamp(info['expire_time']).strftime("%Y-%m-%d %H:%M:%S")
+                export_text += f"{cdk},{info['money']},{time_str}\n"
+        if export_text == "卡密,面值(元),过期时间\n":
+            bot.send_message(cid,"❌暂无未过期有效卡密可导出")
+        else:
+            bio = BytesIO(export_text.encode("utf-8-sig"))
+            bio.name = "全部有效卡密清单.txt"
+            bot.send_document(cid,bio)
+
+    elif d=="check_all_cdk" and is_admin(uid):
+        now = get_now_timestamp()
+        msg = "🎫所有未使用·未过期有效卡密\n"
+        has = False
+        for cdk,info in cards.items():
+            if info['expire_time'] > now:
+                has=True
+                expire_str = datetime.fromtimestamp(info['expire_time']).strftime("%Y-%m-%d %H:%M:%S")
+                msg+=f"卡密：{cdk}\n面值：{info['money']:.4f}元\n过期时间：{expire_str}\n————————\n"
+        if not has:
+            bot.send_message(cid,"暂无任何有效未使用卡密")
+        else:
+            bot.send_message(cid,msg[:4000])
+
     elif d=="ulist" and is_admin(uid):
         msg = "📊全站所有用户余额清单\n"
         for u_id,info in users.items():
@@ -328,6 +361,57 @@ def cb(c):
         temp_split_data[uid] = user_file[uid]['txt']
         bot.send_message(cid,"📄请输入自定义文件名")
         bot.register_next_step_handler(c.message,lambda m:split_send_clean(cid,uid,temp_split_data[uid],m.text))
+
+# 作废单张卡密函数
+def del_single_cdk(msg):
+    cdk = msg.text.strip()
+    if cdk in cards:
+        del cards[cdk]
+        bot.send_message(msg.chat.id,f"✅卡密 {cdk} 已成功作废删除")
+    else:
+        bot.send_message(msg.chat.id,"❌未找到该卡密，可能已被使用/过期")
+
+# 第一步：输入卡密有效期天数
+def input_card_day(msg):
+    try:
+        day = int(msg.text.strip())
+        bot.send_message(msg.chat.id,f"✅有效期{day}天，请输入卡密面值金额")
+        bot.register_next_step_handler(msg, lambda m:make_card(m,day))
+    except:
+        bot.send_message(msg.chat.id,"❌请输入纯数字天数")
+
+# 生成带过期时间卡密
+def make_card(msg,day):
+    try:
+        money = float(msg.text)
+        import string
+        # 有效期换算时间戳
+        expire = get_now_timestamp() + day * 86400
+        cdk = "TK"+''.join(random.choices(string.ascii_uppercase+string.digits,k=12))
+        cards[cdk] = {"money":money,"expire_time":expire}
+        expire_str = datetime.fromtimestamp(expire).strftime("%Y-%m-%d %H:%M:%S")
+        bot.send_message(msg.chat.id,f"✅卡密生成成功\n{cdk}\n面值：{money:.4f}元\n过期时间：{expire_str}")
+    except:
+        bot.send_message(msg.chat.id,"请输入正确金额")
+
+# 卡密充值校验过期+核销
+def use_cdk(m):
+    cdk=m.text.strip()
+    now = get_now_timestamp()
+    if cdk not in cards:
+        bot.send_message(m.chat.id,"❌卡密无效、已使用、已作废或已过期")
+        return
+    info = cards[cdk]
+    # 判断是否过期
+    if info['expire_time'] < now:
+        del cards[cdk]
+        bot.send_message(m.chat.id,"❌该卡密已过期，无法充值")
+        return
+    money = info['money']
+    cards.pop(cdk)
+    get_user(m.from_user.id)['balance']+=money
+    add_rc(m.from_user.id,money)
+    bot.send_message(m.chat.id,f"✅充值到账{money:.4f}元\n余额：{get_user(m.from_user.id)['balance']:.4f}")
 
 def batch_add_user_balance(msg):
     if not is_admin(msg.from_user.id):return
@@ -372,32 +456,12 @@ def admin_sub_balance(msg):
     except:
         bot.send_message(msg.chat.id,"格式错误：用户ID 金额")
 
-def make_card(msg):
-    try:
-        money = float(msg.text)
-        import string
-        cdk = "TK"+''.join(random.choices(string.ascii_uppercase+string.digits,k=12))
-        cards[cdk] = money
-        bot.send_message(msg.chat.id,f"✅卡密生成\n{cdk}\n面值：{money:.4f}元")
-    except:
-        bot.send_message(msg.chat.id,"请输入正确金额")
-
 def set_line(m):
     try:
         get_user(m.from_user.id)['line']=int(m.text)
         bot.send_message(m.chat.id,"✅分割行数设置成功")
     except:
         bot.send_message(m.chat.id,"❌请输入纯数字")
-
-def use_cdk(m):
-    cdk=m.text.strip()
-    if cdk not in cards:
-        bot.send_message(m.chat.id,"❌卡密无效或已使用")
-        return
-        money=cards.pop(cdk)
-    get_user(m.from_user.id)['balance']+=money
-    add_rc(m.from_user.id,money)
-    bot.send_message(m.chat.id,f"✅充值到账{money:.4f}元\n余额：{get_user(m.from_user.id)['balance']:.4f}")
 
 def ins_num(m):
     uid=m.from_user.id
