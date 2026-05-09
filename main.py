@@ -12,7 +12,7 @@ user_settings = {}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "你好，我是分包机器人！\n"
-        "使用步骤：\n"
+        "步骤：\n"
         "1️⃣ /setlines <行数> 设置每个分包行数\n"
         "2️⃣ 发送 TXT 文件，我会按行拆分并发送\n"
         "每 10 个文件一批，每个文件间隔 3 秒"
@@ -38,7 +38,7 @@ def read_txt_file(filepath):
             continue
     return None
 
-# 分批发送文件
+# 分批发送文件，每 10 个文件一批
 async def send_chunks(update: Update, chunk_files):
     batch_size = 10
     total_files = len(chunk_files)
@@ -46,12 +46,14 @@ async def send_chunks(update: Update, chunk_files):
 
     for i in range(0, total_files, batch_size):
         batch = chunk_files[i:i+batch_size]
+        # 发送这一批的所有文件
         for f in batch:
             with open(f, "rb") as file_to_send:
                 await update.message.reply_document(file_to_send)
             sent_files += 1
-            await update.message.reply_text(f"已发送 {sent_files}/{total_files} 个分包")
             await asyncio.sleep(3)  # 每个文件间隔 3 秒
+        # 批发送完成后发送进度提示
+        await update.message.reply_text(f"已发送 {sent_files}/{total_files} 个分包")
         await asyncio.sleep(1)  # 批间隔 1 秒
 
 # 文件处理
@@ -90,7 +92,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"文件拆分完成，共 {len(chunk_files)} 个分包，开始发送...")
 
-    # 发送分包文件
+    # 分批发送
     await send_chunks(update, chunk_files)
 
     # 删除临时文件
