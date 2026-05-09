@@ -117,7 +117,7 @@ def menu(uid):
 def user_menu(uid):
     kb = telebot.types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        telebot.types.InlineButton("💰个人余额",callback_data="bal"),
+        telebot.types.InlineKeyboardButton("💰个人余额",callback_data="bal"),
         telebot.types.InlineKeyboardButton("💳充值记录",callback_data="rclog")
     )
     kb.add(
@@ -203,8 +203,8 @@ def merge_done(m):
         bio = BytesIO(vcf_all.encode())
         bio.name = "合并通讯录.vcf"
     else:
-    bio = BytesIO(txt.encode())
-    bio.name = "合并成品.txt"
+        bio = BytesIO(txt.encode())
+        bio.name = "合并成品.txt"
 
     bot.send_document(m.chat.id, bio)
     user_state[uid] = "idle"
@@ -226,7 +226,7 @@ def admin_commands(msg):
         try:
             uid = int(txt.replace("查询用户消费记录", "").strip())
             log = log_user.get(uid, ["该用户暂无消费记录"])
-            bot.send_message(msg.chat.id, f"📋用户{uid}消费明细\n" + "\n".join(log)[:4000])
+            bot.send_message(m.chat.id, f"📋用户{uid}消费明细\n" + "\n".join(log)[:4000])
         except:
             bot.send_message(msg.chat.id, "❌格式：查询用户消费记录 用户ID")
 
@@ -306,7 +306,7 @@ def callback(c):
             bot.edit_message_text("🏠主菜单", cid, c.message.id, reply_markup=menu(uid))
 
         elif d == "hebing":
-            user_merge[uid] = []
+            user_merge[txt] = []
             user_state[uid] = "hebing"
             bot.send_message(cid, "📎依次发送文件，发完回复：完成")
 
@@ -487,7 +487,6 @@ def clean_split(cid, uid, txt, name):
     total = len(lines)
     u = get_user(uid)
     fee = total * PRICE_SPLIT
-
     if u['balance'] < fee:
         bot.send_message(cid, "❌余额不足")
         return
@@ -572,7 +571,7 @@ def handle_file(m):
 
 def admin_add_balance(m):
     try:
-        uid, money = Railway.text.split()
+        uid, money = m.text.split()
         uid = int(uid)
         money = float(money)
         get_user(uid)['balance'] += money
@@ -596,7 +595,7 @@ def create_card(m):
         money = float(m.text)
         import string
         cdk = "TK"+''.join(random.choices(string.ascii_uppercase+string.digits,k=10))
-        cads[cdk]=money
+        cards[cdk]=money
         bot.send_message(m.chat.id,f"✅卡密：\n{cdk}\n面值：{money:.4f}")
     except:
         bot.send_message(m.chat.id,"❌请输入正确金额")
