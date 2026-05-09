@@ -127,7 +127,7 @@ def user_menu(uid):
     )
     return kb
 
-# 管理员后台【新增作废卡密+导出卡密】
+# 管理员后台
 def admin_kb():
     kb = telebot.types.InlineKeyboardMarkup(row_width=2)
     kb.add(telebot.types.InlineKeyboardButton("➕单人手动加余额",callback_data="addbal"),telebot.types.InlineKeyboardButton("➖单人扣余额",callback_data="subbal"))
@@ -160,8 +160,10 @@ def cancel_all(msg):
     uid = msg.from_user.id
     user_state[uid] = "idle"
     user_merge[uid] = ""
-    if uid in user_insert: del user_insert[uid]
-    if uid in user_file: del user_file[uid]
+    if uid in user_insert:
+        del user_insert[uid]
+    if uid in user_file:
+        del user_file[uid]
     bot.send_message(msg.chat.id,"✅已清空所有操作缓存，请重新上传文件")
 
 # 文件合并
@@ -251,7 +253,6 @@ def admin_broadcast(msg):
     broad_img = None
     broad_text = ""
 
-# 修复Lambda致命报错 + 延迟删除缓存
 temp_split_data = {}
 
 @bot.callback_query_handler(func=lambda c:True)
@@ -275,7 +276,8 @@ def cb(c):
         bot.edit_message_text("👤个人中心",cid,c.message.message_id,reply_markup=user_menu(uid))
     elif d=="bal":
         bot.send_message(cid,f"💰您当前余额：{get_user(uid)['balance']:.4f}元")
-    elif d=="rclog":
+    bot.answer_callback_query(c.id)
+    elif d=="rclog"):
         txt="\n".join(log_recharge.get(uid,["暂无充值记录"]))
         bot.send_message(cid,txt[:4000])
     elif d=="uselog":
@@ -293,12 +295,15 @@ def cb(c):
     elif d=="admin" and is_admin(uid):
         bot.edit_message_text("🔧管理员后台控制面板",cid,c.message.message_id,reply_markup=admin_kb())
 
-    # ========== 新增：作废指定卡密 ==========
+    # 修复卡密生成按钮
+    elif d=="card" and is_admin(uid):
+        bot.send_message(cid,"🎟️请输入卡密有效期【天数】")
+        bot.register_next_step_handler(c.message, input_card_day)
+
     elif d=="del_cdk" and is_admin(uid):
         bot.send_message(cid,"🗑️请发送要作废删除的完整卡密")
         bot.register_next_step_handler(c.message, del_single_cdk)
 
-    # ========== 新增：导出全部有效卡密TXT ==========
     elif d=="export_cdk" and is_admin(uid):
         now = get_now_timestamp()
         export_text = "卡密,面值(元),过期时间\n"
@@ -362,7 +367,7 @@ def cb(c):
         bot.send_message(cid,"📄请输入自定义文件名")
         bot.register_next_step_handler(c.message,lambda m:split_send_clean(cid,uid,temp_split_data[uid],m.text))
 
-# 作废单张卡密函数
+# 作废单张卡密
 def del_single_cdk(msg):
     cdk = msg.text.strip()
     if cdk in cards:
@@ -371,7 +376,7 @@ def del_single_cdk(msg):
     else:
         bot.send_message(msg.chat.id,"❌未找到该卡密，可能已被使用/过期")
 
-# 第一步：输入卡密有效期天数
+# 输入有效期天数
 def input_card_day(msg):
     try:
         day = int(msg.text.strip())
@@ -380,12 +385,11 @@ def input_card_day(msg):
     except:
         bot.send_message(msg.chat.id,"❌请输入纯数字天数")
 
-# 生成带过期时间卡密
+# 生成卡密
 def make_card(msg,day):
     try:
         money = float(msg.text)
         import string
-        # 有效期换算时间戳
         expire = get_now_timestamp() + day * 86400
         cdk = "TK"+''.join(random.choices(string.ascii_uppercase+string.digits,k=12))
         cards[cdk] = {"money":money,"expire_time":expire}
@@ -394,7 +398,7 @@ def make_card(msg,day):
     except:
         bot.send_message(msg.chat.id,"请输入正确金额")
 
-# 卡密充值校验过期+核销
+# 卡密兑换
 def use_cdk(m):
     cdk=m.text.strip()
     now = get_now_timestamp()
@@ -402,7 +406,6 @@ def use_cdk(m):
         bot.send_message(m.chat.id,"❌卡密无效、已使用、已作废或已过期")
         return
     info = cards[cdk]
-    # 判断是否过期
     if info['expire_time'] < now:
         del cards[cdk]
         bot.send_message(m.chat.id,"❌该卡密已过期，无法充值")
@@ -542,7 +545,7 @@ END:VCARD
             bio=BytesIO("\n".join(temp_list).encode())
             filename = f"{m.text}_{idx}.txt"
         bio.name=filename
-        media.append(InputMediaDocument(bio))
+        media=media+[InputMediaDocument(bio)]
 
         if len(media)>=BATCH_SIZE:
             bot.send_media_group(m.chat.id,media)
@@ -561,7 +564,7 @@ END:VCARD
     del user_file[uid]
     del user_insert[uid]
 
-# 纯净分包 修复KeyError致命BUG
+# 纯净分包
 def split_send_clean(cid,uid,txt,name):
     lines=[x for x in txt.splitlines() if x]
     total=len(lines)
@@ -602,7 +605,6 @@ def split_send_clean(cid,uid,txt,name):
     if media:bot.send_media_group(cid,media)
     bot.send_message(cid,f"🎉纯净分包全部发送完毕\n北京时间：{get_beijing_time_str()}")
     
-    # 延时删除，不会KeyError闪退
     if uid in temp_split_data:del temp_split_data[uid]
     if uid in user_file:del user_file[uid]
 
@@ -684,10 +686,10 @@ def doc(m):
     except Exception as e:
         bot.send_message(m.chat.id,f"❌文件读取失败：{str(e)}")
 
-# Railway稳定防闪退循环
+# 防掉线循环
 while True:
     try:
         bot.polling(none_stop=True)
     except Exception as e:
-        print(f"掉线自动重连: {e}")
+        print(f"掉线重连: {e}")
         time.sleep(5)
