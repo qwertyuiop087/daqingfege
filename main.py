@@ -77,7 +77,7 @@ def extract_txt_from_zip(zip_bytes):
         for file_name in zip_file.namelist():
             if file_name.lower().endswith(".txt") and not file_name.endswith("/"):
                 data = zip_file.read(file_name)
-                txt = data.decode("utf-8", "ignore")
+                txt = data.decode("utf-8","ignore")
                 all_text += txt + "\n"
         zip_file.close()
         return clean_empty_line(all_text)
@@ -153,11 +153,11 @@ def heb(m):
         vcf_all = ""
         for phone in txt.splitlines():
             name = get_rand_3_name()
-            vcf_all += f"BEGIN:VCARD\nVERSION:3.0\nN:{name};;;\nFN:{name}\nTEL;TYPE=CELL:{phone}\n"
+            vcf_all += f"BEGIN:VCARD\nVERSION:3.0\nN:{name};;;\nFN:{name}\nTEL;TYPE=CELL:{phone}\nEND:VCARD\n"
         bio=BytesIO(vcf_all.encode())
         bio.name="合并通讯录.vcf"
     else:
-        bio=BytesIO(bio.encode())
+        bio=BytesIO(txt.encode())
         bio.name="合并成品.txt"
     bot.send_document(m.chat.id,bio)
     user_state[uid]="idle"
@@ -203,7 +203,7 @@ def admin_broadcast(msg):
                 bot.send_message(uid, broad_text)
             send_count += 1
         except:continue
-    bot.send_message(msg.chat.id,f"🎉全站广播全部结束\n成功送达总数：{send_count} 位用户")
+    bot.send_message(msg.chat.id,f"🎉全站广播全部结束\n成功送达总数：{send_count} 位\n当前时间：{get_beijing_time_str()}")
     broad_img = None
     broad_text = ""
 
@@ -276,7 +276,7 @@ def cb(c):
         for cdk,info in cards.items():
             if info['expire_time'] > now:
                 t=datetime.fromtimestamp(info['expire_time']).strftime("%Y-%m-%d %H:%M:%S")
-                msg+=f"卡密:{cdk}\n面值:{info['money']}\n过期:{t}\n----\n"
+                msg+=f"卡密\n{cdk}\n面值:{info['money']}\n过期:{t}\n----\n"
         bot.send_message(cid,msg[:4000] if msg else "暂无有效卡密")
 
     elif d=="ulist" and is_admin(uid):
@@ -304,7 +304,7 @@ def cb(c):
     elif d=="noins":
         if uid not in user_file:return bot.send_message(cid,"请先上传文件")
         temp_split_data[uid]=user_file[uid]['txt']
-        bot.send_message(cid,"请输入文件名")
+        bot.send_message(cid,"请输入文件名前缀")
         bot.register_next_step_handler(c.message,lambda m:split_send_clean(cid,uid,temp_split_data[uid],m.text))
 
 def del_single_cdk(msg):
@@ -323,7 +323,6 @@ def input_card_day(msg):
     except:
         bot.send_message(msg.chat.id,"❌请输入纯数字天数")
 
-# 修复核心字典BUG
 def make_card(msg,day):
     try:
         money = float(msg.text)
@@ -367,8 +366,10 @@ def batch_add_user_balance(msg):
             money = float(money)
             get_user(uid)['balance']+=money
             add_rc(uid, money)
+            bot.send_message(msg.chat.id,f"✅已发送：{uid}")
             success +=1
         except:
+            bot.send_message(msg.chat.id,f"❌格式错误：")
             fail.append(line)
     reply = f"✅批量充值完成\n成功：{success} 个用户"
     if fail:
@@ -444,11 +445,16 @@ def ins_done(m):
     chunk = [lines[i:i+u['line']] for i in range(0,total,u['line'])]
     media=[]
     idx=1
+    start=1
     ph_idx=0
     phones = info['phone']
     csv_rows = "分包,位置,原号,雷号\n"
     for c in chunk:
         chunk_len = len(c)
+        end = start + chunk_len -1
+        bot.send_message(m.chat.id,f"📤正在发送第{idx}批：{start}～{end}行")
+        start = end+1
+
         insert_pos_list = random.sample(range(1, chunk_len+1), info['num'])
         insert_pos_list.sort()
         temp_list = c.copy()
@@ -469,7 +475,7 @@ def ins_done(m):
             bio.name=f"{m.text}_{idx}.txt"
         media.append(InputMediaDocument(bio))
         if len(media)>=BATCH_SIZE:
-            bot.send_media_group(m.chat.id,media)
+            bot.send_media_group(uid=m.chat.id,media=media)
             time.sleep(3)
             media=[]
         idx+=1
@@ -477,10 +483,11 @@ def ins_done(m):
     csv_bio=BytesIO(csv_rows.encode("utf-8-sig"))
     csv_bio.name="插雷明细.csv"
     bot.send_document(m.chat.id,csv_bio)
-    bot.send_message(m.chat.id,"✅全部完成")
+    bot.send_message(m.chat.id,f"✅插雷分包全部完成\n当前北京时间：{get_beijing_time_str()}")
     del user_file[uid]
     del user_insert[uid]
 
+# ========== 纯净分包 修复分段提示+结尾时间 ==========
 def split_send_clean(cid,uid,txt,name):
     lines=[x for x in txt.splitlines() if x]
     total=len(lines)
@@ -494,7 +501,12 @@ def split_send_clean(cid,uid,txt,name):
     chunk = [lines[i:i+u['line']] for i in range(0,total,u['line'])]
     media=[]
     idx=1
+    start=1
     for c in chunk:
+        end = start + len(c) -1
+        bot.send_message(cid,f"📤正在发送第{idx}批：{start}～{end}行")
+        start = end+1
+
         if u['mode']=="VCF":
             vcf=""
             for p in c:
@@ -512,7 +524,10 @@ def split_send_clean(cid,uid,txt,name):
             media=[]
         idx+=1
     if media:bot.send_media_group(cid,media)
-    bot.send_message(cid,"✅纯净分包完成")
+    
+    # 结尾补上北京时间
+    bot.send_message(cid,f"✅纯净分包全部完成\n当前北京时间：{get_beijing_time_str()}")
+    
     if uid in temp_split_data:del temp_split_data[uid]
     if uid in user_file:del user_file[uid]
 
@@ -532,7 +547,7 @@ def doc(m):
                 txt=data.decode("utf-8","ignore")
             txt=clean_empty_line(txt)
             user_merge[uid].append(txt)
-            bot.send_message(m.chat.id,f"已收录第{len(user_merge[uid])}个")
+            bot.send_message(m.chat.id,f"已收录第{len(user_merge[uid])}个文件")
             return
         if state=="quchong":
             if name.endswith(".zip"):txt=extract_txt_from_zip(data)
@@ -544,8 +559,8 @@ def doc(m):
             u=get_user(uid)
             if u['balance']<fee:return bot.send_message(m.chat.id,"❌余额不足")
             u['balance']-=fee
-            add_log(uid,"去重",old,fee)
-            bot.send_message(m.chat.id,f"去重：{old}→{new} 扣费{fee:.4f}")
+            add_log(uid,"号码去重",old,fee)
+            bot.send_message(m.chat.id,f"去重完成：旧{old}行→新{new}行\n扣费{fee:.4f}")
             user_state[uid]="idle"
             return
         
@@ -555,9 +570,9 @@ def doc(m):
             txt=data.decode("utf-8","ignore")
         txt=clean_empty_line(txt)
         user_file[uid]={"txt":txt}
-        bot.send_message(m.chat.id,"✅文件已保存",reply_markup=select_menu())
+        bot.send_message(m.chat.id,"✅文件已保存，请选择分包模式",reply_markup=select_menu())
     except Exception as e:
-        bot.send_message(m.chat.id,f"错误：{str(e)}")
+        bot.send_message(m.chat.id,f"处理异常：{str(e)}")
 
 while True:
     try:
