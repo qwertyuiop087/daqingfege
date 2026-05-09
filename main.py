@@ -1,13 +1,15 @@
 import asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 import os
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
+# 环境变量读取
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SEND_DELAY = 3.0
 user_line_setting = {}
 DEFAULT_LINE = 80
 
+# 设置分包行数
 async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
@@ -20,12 +22,14 @@ async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("格式错误！用法：/set 50")
 
-async def get_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 查看当前设置
+async def now_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     now = user_line_setting.get(user_id, DEFAULT_LINE)
     await update.message.reply_text(f"📌 当前每包行数：{now}")
 
-async def txt_split_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# TXT分包核心
+async def split_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     doc = msg.document
     user_id = update.effective_user.id
@@ -40,31 +44,31 @@ async def txt_split_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [line.strip() for line in content.splitlines() if line.strip()]
 
     if not lines:
-        await msg.reply_text("文件为空或无有效内容")
+        await msg.reply_text("文件无有效内容")
         return
 
     total = len(lines)
-    await msg.reply_text(f"📄 解析完成\n总行数：{total}\n每包：{line_per}行\n开始分包")
+    await msg.reply_text(f"📄 解析完成\n总行数：{total}\n每包：{line_per}行")
 
-    packs = []
-    for i in range(0, total, line_per):
-        packs.append(lines[i:i+line_per])
+    packs = [lines[i:i+line_per] for i in range(0, total, line_per)]
 
     for idx, pack in enumerate(packs, 1):
         text = f"【分包 {idx}/{len(packs)}】\n" + "\n".join(pack)
         await msg.reply_text(text)
         await asyncio.sleep(SEND_DELAY)
 
-    await msg.reply_text(f"✅ 分包全部完成！共 {len(packs)} 包")
+    await msg.reply_text(f"✅ 全部分包完成！共{len(packs)}包")
 
+# 修复循环崩溃专用启动方式
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("set", set_line))
-    app.add_handler(CommandHandler("now", get_line))
-    app.add_handler(MessageHandler(filters.Document.ALL, txt_split_handler))
+    app.add_handler(CommandHandler("now", now_line))
+    app.add_handler(MessageHandler(filters.Document.ALL, split_txt))
     
-    # 新版正确写法 run_polling
-    await app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
