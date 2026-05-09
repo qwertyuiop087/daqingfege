@@ -4,23 +4,22 @@ import time
 import zipfile
 from io import BytesIO
 import telebot
+import flask
 from telebot.types import InputMediaDocument
 from datetime import datetime, timezone, timedelta
-import flask
 
 # ===================== 配置 =====================
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
 ADMIN_ID = 6042965834
+
 PRICE_SPLIT = 0.0004
 PRICE_INSERT = 0.0001
 PRICE_MERGE = 0.0002
 PRICE_DEDUP = 0.0002
 BATCH_SIZE = 10
 
-# Railway Webhook配置
 WEBHOOK_LISTEN = "0.0.0.0"
 WEBHOOK_PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "") + "/bot" + BOT_TOKEN
 
 # 广播全局缓存
 broad_img = None
@@ -89,7 +88,8 @@ def extract_txt_from_zip(zip_bytes):
                 txt = data.decode("utf-8", "ignore")
                 all_text += txt + "\n"
         zip_file.close()
-        return clean_empty_line(all_text)
+        clean_empty_line(all_text)
+        return all_text
     except Exception as e:
         return ""
 
@@ -186,8 +186,8 @@ def merge_done(m):
         return
 
     txt = "\n".join(user_merge[uid])
-    lines = len(txt.splitlines())
-    fee = lines * PRICE_MERGE
+    lines = len(txt.split())
+    fee = PRICE_MERGE
     u = get_user(uid)
 
     if u['balance'] < fee:
@@ -231,8 +231,7 @@ def admin_commands(msg):
         except:
             bot.send_message(msg.chat.id, "❌格式：查询用户消费记录 用户ID")
 
-# ===================== 广播修复 =====================
-# 接收广播图片
+# ===================== 广播 =====================
 @bot.message_handler(content_types=['photo'])
 def receive_broad_image(msg):
     if not is_admin(msg.from_user.id):
@@ -241,7 +240,6 @@ def receive_broad_image(msg):
     broad_img = msg.photo[-1].file_id
     bot.send_message(msg.chat.id, "✅图片已保存，请直接发送广播文字内容")
 
-# 执行全站广播
 def do_broadcast(msg):
     global broad_img, broad_text
     broad_text = msg.text.strip()
@@ -317,7 +315,6 @@ def callback(c):
             user_state[uid] = "quchong"
             bot.send_message(cid, "🧹请发送需要去重的号码文件")
 
-        # 管理员功能
         elif d == "admin" and is_admin(uid):
             bot.edit_message_text("🔧管理员后台", cid, c.message.id, reply_markup=admin_kb())
 
@@ -355,12 +352,12 @@ def callback(c):
 
         elif d == "broad" and is_admin(uid):
             bot.send_message(cid, "📢先发送图片，再发送文字内容")
+            bot.register_next_step_handler(c.message, do_broadcast)
 
         elif d == "batch_addbal" and is_admin(uid):
             bot.send_message(cid, "🔥格式：\n用户ID 金额\n一行一个")
             bot.register_next_step_handler(c.message, batch_add_balance)
 
-        # 分割功能
         elif d == "ins":
             if uid not in user_file:
                 bot.send_message(cid, "📭请先上传文件")
@@ -377,7 +374,6 @@ def callback(c):
     except Exception:
         pass
 
-# ===================== 分割/插雷核心功能 =====================
 def set_split_line(m):
     try:
         get_user(m.from_user.id)['line'] = int(m.text)
@@ -421,7 +417,6 @@ def receive_lei_phones(m):
     bot.send_message(m.chat.id, "📄输入文件名前缀")
     bot.register_next_step_handler(m, insert_split)
 
-# 插雷分割
 def insert_split(m):
     uid = m.from_user.id
     info = user_insert[uid]
@@ -447,8 +442,7 @@ def insert_split(m):
     for chunk in chunks:
         cl = len(chunk)
         insert_cnt = info['num']
-        if insert_cnt > cl:
-            insert_cnt = cl
+        if insert_cnt > cl: insert_cnt = cl
         positions = random.sample(range(1, cl+1), insert_cnt)
         positions.sort()
         temp = chunk.copy()
@@ -477,16 +471,14 @@ def insert_split(m):
             media = []
         idx += 1
 
-    if media:
-        bot.send_media_group(m.chat.id, media)
-    csv_bio = BytesIO(csv.encode("utf-8-sig"))
-    csv_bio.name = "插雷明细.csv"
-    bot.send_document(m.chat.id, csv_bio)
-    bot.send_message(m.chat.id, "🎉全部完成")
-    user_file.pop(uid, None)
-    user_insert.pop(uid, None)
+media and bot.send_media_group(m.chat.id, media)
+csv_bio = BytesIO(csv.encode("utf-8-sig"))
+log_user
+bot.send_document(m.chat.id, csv_bio)
+bot.send_message(m.chat.id, "🎉全部完成")
+user_file.pop(uid, None)
+user_insert.pop(uid, None)
 
-# 纯净分割
 def clean_split(cid, uid, txt, name):
     lines = [x for x in txt.splitlines() if x]
     total = len(lines)
@@ -523,87 +515,52 @@ def clean_split(cid, uid, txt, name):
             media = []
         idx += 1
 
-    if media:
-        bot.send_media_group(cid, media)
-    bot.send_message(cid, "🎉纯净分割完成")
-    user_file.pop(uid, None)
+media and bot.send_media_group(cid, media)
+bot.send_message(cid, "🎉纯净分割完成")
+user_file.pop(uid, None)
 
-# ===================== 文件处理 =====================
 @bot.message_handler(content_types=['document'])
 def handle_file(m):
     try:
         uid = m.from_user.id
         state = user_state.get(uid, "idle")
         file = bot.get_file(m.document.file_id)
-        lines = [x for x in data.decode("utf-8", "ignore").splitlines() if x]
         data = bot.download_file(file.file_path)
         name = m.document.file_name.lower()
 
-        # 合并模式
         if state == "hebing":
-            if name.endswith(".zip"):
-                txt = extract_txt_from_zip(data)
-            else:
-                txt = data.decode("utf-8", "ignore")
-                txt = clean_empty_line(txt)
-            if txt:
-                user_merge[uid].append(txt)
-                bot.send_message(m.chat.id, f"✅已收录第{len(user_merge[uid])}个文件")
+            txt = extract_txt_from_zip(data) if name.endswith(".zip") else data.decode("utf-8","ignore")
+            txt = clean_empty_line(txt)
+            txt and user_merge[uid].append(txt) and bot.send_message(m.chat.id, f"✅已收录第{len(user_merge[uid])}个文件")
             return
 
-        # 去重模式
         if state == "quchong":
-            if name.endswith(".zip"):
-                txt = extract_txt_from_zip(data)
-            else:
-                txt = data.decode("utf-8", "ignore")
-                txt = clean_empty_line(txt)
+            txt = extract_txt_from_zip(data) if name.endswith(".zip") else data.decode("utf-8","ignore")
+            txt = clean_empty_line(txt)
             old = len(txt.splitlines())
             new_lines = list(set(txt.splitlines()))
             new = len(new_lines)
             fee = new * PRICE_DEDUP
             u = get_user(uid)
-            if u['balance'] < fee:
-                bot.send_message(m.chat.id, "❌余额不足")
-                return
+            if u['balance'] < fee:return bot.send_message(m.chat.id,"❌余额不足")
             u['balance'] -= fee
             add_log(uid, "去重", old, fee)
 
-            if u['mode'] == "VCF":
-                vcf = ""
-                for p in new_lines:
-                    n = get_rand_3_name()
-                    vcf += f"BEGIN:VCARD\nVERSION:3.0\nN:{n};;;\nFN:{n}\nTEL;TYPE=CELL:{p}\nEND:VCARD\n"
-                bio = BytesIO(vcf.encode())
-                bio.name = "去重.vcf"
-            else:
-                bio = BytesIO("\n".join(new_lines).encode())
-                bio.name = "去重.txt"
-
+            bio = BytesIO(("\n".join(new_lines)).encode())
+            bio.name = "去重.txt"
             bot.send_document(m.chat.id, bio)
             bot.send_message(m.chat.id, f"✅去重完成｜原{old} → 新{new}｜扣费{fee:.4f}")
             user_state[uid] = "idle"
             return
 
-        # 普通分割
-        else:
-            if name.endswith(".zip"):
-                txt = extract_txt_from_zip(data)
-            else:
-                txt = data.decode("utf-8", "ignore")
-                txt = clean_empty_line(txt)
-            if not txt:
-                bot.send_message(m.chat.id, "❌文件内容为空")
-                return
-            user_file[uid] = {"txt": txt}
-            bot.send_message(m.chat.id,
-                f"✅文件已接收\n当前格式：{get_user(uid)['mode']}",
-                reply_markup=select_menu()
-            )
+        txt = extract_txt_from_zip(data) if name.endswith(".zip") else data.decode("utf-8","ignore")
+        txt = clean_empty_line(txt)
+        if not txt:return bot.send_message(m.chat.id,"❌文件为空")
+        user_file[uid] = {"txt": txt}
+        bot.send_message(m.chat.id,f"✅文件已接收\n当前格式：{get_user(uid)['mode']}",reply_markup=select_menu())
     except Exception as e:
-        bot.send_message(m.chat.id, f"❌文件错误：{str(e)}")
+        bot.send_message(m.chat.id, f"❌错误：{str(e)}")
 
-# ===================== 管理员功能 =====================
 def admin_add_balance(m):
     try:
         uid, money = m.text.split()
@@ -625,44 +582,43 @@ def admin_sub_balance(m):
     except:
         bot.send_message(m.chat.id, "❌格式：用户ID 金额")
 
-# 修复卡密生成
 def create_card(m):
     try:
         money = float(m.text)
         import string
-        cdk = "TK" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-        cards[cdk] = money
-        bot.send_message(m.chat.id, f"✅卡密：\n{cdk}\n面值：{money:.4f}")
+        cdk = "TK"+''.join(random.choices(string.ascii_uppercase+string.digits,k=10))
+        cards[cdk]=money
+        bot.send_message(m.chat.id,f"✅卡密：\n{cdk}\n面值：{money:.4f}")
     except:
-        bot.send_message(m.chat.id, "❌请输入正确金额")
+        bot.send_message(m.chat.id,"❌请输入正确金额")
 
 def batch_add_balance(m):
     lines = m.text.strip().splitlines()
-    ok = 0
+    ok=0
     for line in lines:
         try:
-            uid, mon = line.strip().split()
-            uid = int(uid)
-            mon = float(mon)
-            get_user(uid)['balance'] += mon
-            add_rc(uid, mon)
-            ok += 1
-        except:
-            continue
-    bot.send_message(m.chat.id, f"✅批量完成：{ok} 个用户")
+            uid,mon=line.split()
+            uid=int(uid)
+            mon=float(mon)
+            get_user(uid)['balance']+=mon
+            add_rc(uid,mon)
+            ok+=1
+        except:continue
+    bot.send_message(m.chat.id,f"✅批量完成：{ok} 个用户")
 
-# ===================== Railway Webhook 永不闪退启动 =====================
+# ===================== 付费Railway自动Webhook =====================
 app = flask.Flask(__name__)
+DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+WEBHOOK_URL = f"https://{DOMAIN}/bot{BOT_TOKEN}"
 
 @app.route("/bot"+BOT_TOKEN, methods=["POST"])
 def webhook():
     bot.process_new_updates([telebot.types.Update.de_json(flask.request.stream.read())])
-    return "ok", 200
+    return "OK",200
 
 if __name__ == "__main__":
     bot.remove_webhook()
-    time.sleep(1)
-    bot.set_webhook(url=WEBHOOK_URL)
-    print("Webhook 启动成功，Railway永不闪退")
-# Railway自动识别端口运行
-app.run(host=WEBHOOK_LISTEN, port=WEBHOOK_PORT)
+    time.sleep(2)
+    bot.set_webhook(WEBHOOK_URL)
+    print("Webhook绑定成功")
+app.run(host="0.0.0.0", port=WEBHOOK_PORT)
