@@ -1,73 +1,32 @@
-import asyncio
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-SEND_DELAY = 3.0
-user_line_setting = {}
-DEFAULT_LINE = 80
+TOKEN = os.environ.get("BOT_TOKEN")
+PORT = int(os.environ.get("PORT", 8443))  # Railway 会提供环境变量 PORT
+APP_URL = os.environ.get("APP_URL")       # Railway 提供的项目域名
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ 机器人正常运行\n/set 数字 设置每包行数\n/now 查看当前行数\n直接发送TXT自动分包")
+    await update.message.reply_text("你好，我是你的机器人！")
 
-async def set_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    try:
-        num = int(context.args[0])
-        if 1 <= num <= 500:
-            user_line_setting[user_id] = num
-            await update.message.reply_text(f"✅ 已设置：每包 {num} 行")
-        else:
-            await update.message.reply_text("请输入1~500之间的数字")
-    except:
-        await update.message.reply_text("格式错误！用法：/set 50")
-
-async def now_line(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    now = user_line_setting.get(user_id, DEFAULT_LINE)
-    await update.message.reply_text(f"📌 当前每包行数：{now}")
-
-async def split_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    doc = msg.document
-    user_id = update.effective_user.id
-    line_per = user_line_setting.get(user_id, DEFAULT_LINE)
-
-    if not doc.file_name.lower().endswith(".txt"):
-        await msg.reply_text("请发送TXT文本文件")
-        return
-
-    file = await doc.get_file()
-    content = await file.download_as_string()
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-
-    if not lines:
-        await msg.reply_text("文件无有效内容")
-        return
-
-    total = len(lines)
-    await msg.reply_text(f"📄 解析完成\n总行数：{total}\n每包：{line_per}行")
-
-    packs = [lines[i:i+line_per] for i in range(0, total, line_per)]
-
-    for idx, pack in enumerate(packs, 1):
-        text = f"【分包 {idx}/{len(packs)}】\n" + "\n".join(pack)
-        await msg.reply_text(text)
-        await asyncio.sleep(SEND_DELAY)
-
-    await msg.reply_text(f"✅ 全部分包完成！共{len(packs)}包")
-
-async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set", set_line))
-    app.add_handler(CommandHandler("now", now_line))
-    app.add_handler(MessageHandler(filters.Document.ALL, split_txt))
-
-    # 关键：接收所有消息，修复不响应
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    await update.message.reply_text(f"你说的是：{text}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if not TOKEN or not APP_URL:
+        print("请确保 BOT_TOKEN 和 APP_URL 已设置")
+        exit(1)
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    # 设置 webhook
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{APP_URL}/{TOKEN}"
+    )
