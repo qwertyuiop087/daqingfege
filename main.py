@@ -7,7 +7,7 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # ================= 配置区 =================
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
-MY_ID = 6042965834  # 你的Telegram ID
+MY_ID = 6042965834  # 你的Telegram数字ID
 # ==========================================
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -18,15 +18,15 @@ def get_beijing_time():
 
 def extract_link_smartly(text):
     if not text: return None
-    # 强力提取 .vip 链接，无视前后干扰
+    # 强化正则：无视前后干扰，精准定位 .vip 链接
     full_link = re.search(r"([a-zA-Z0-9-]+\.vip)", text)
     if full_link: return full_link.group(1)
-    # 兜底识别 4-8 位数字
+    # 兜底：找 4-8 位数字补全
     all_numbers = re.findall(r"\d{4,8}", text)
     if all_numbers: return f"{all_numbers[-1]}.vip"
     return None
 
-# --- 数据库操作 ---
+# --- 数据库初始化 ---
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
@@ -60,14 +60,14 @@ def is_chat_authorized(chat_id):
     conn.close()
     return True if res else False
 
-# --- 权限管理 ---
+# --- 权限管理指令 ---
 async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
     conn = sqlite3.connect('stats.db')
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("✅ **服务开启** | 已支持图片识别与资金钱包系统")
+    await update.message.reply_text("✅ **服务已开启** | 支持图片识别、资金钱包及防套娃包号识别。")
 
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
@@ -78,7 +78,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('DELETE FROM admins WHERE chat_id = ?', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("🚫 **服务停止** | 本群所有权限与统计数据已清空")
+    await update.message.reply_text("🚫 **服务停止** | 本群所有权限与统计数据已物理清空。")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID or not update.message.reply_to_message: return
@@ -98,19 +98,7 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"❌ 已撤销 {target.full_name} 的管理员权限")
 
-# --- 钱包查询 ---
-async def check_my_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_chat_authorized(chat_id): return
-    balance = get_worker_balance(chat_id, update.effective_user.id)
-    await update.message.reply_text(
-        f"💰 **资金详情**\n━━━━━━━━━━━━━━\n"
-        f"👤 **用户:** [{update.effective_user.full_name}](tg://user?id={update.effective_user.id})\n"
-        f"💵 **当前总余额:** `{balance}`\n"
-        f"⏰ **时间:** `{get_beijing_time()}`", parse_mode='Markdown'
-    )
-
-# --- 核心：加减单逻辑 ---
+# --- 核心：加减单逻辑 (带防套娃抓取) ---
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
@@ -118,22 +106,32 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_msg = update.message.reply_to_message
     if not reply_msg: return
 
-    # 兼容读取纯文字和图片说明文字
+    # 同时兼容文字账单和带图账单
     source_text = reply_msg.text if reply_msg.text else reply_msg.caption
     if not source_text: return
 
+    # 提取网址
     link = extract_link_smartly(source_text)
     if not link: return
 
-    file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
-    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else "未识别包号"
+    # --- 防套娃包号抓取逻辑 ---
+    # 优先查找“包号：”之后的内容，不管前面是谁的名字
+    file_block_match = re.search(r"包号[：:](.*)", source_text)
+    if file_block_match:
+        # 截取掉可能跟着的“手机号”、“数量”等后缀，只留核心包号
+        f_name = file_block_match.group(1).split("手机号")[0].split("数量")[0].split("成功")[0].strip()
+    else:
+        # 如果没有“包号”字样，直接抓取消息的第一行作为包号
+        f_name = source_text.split('\n')[0][:30].strip()
 
+    # 提取加减分数值
     val_match = re.search(r"^([+-])(\d+)$", update.message.text.strip())
     if not val_match: return
     change_val = int(val_match.group(2)) if val_match.group(1) == '+' else -int(val_match.group(2))
     
     worker = reply_msg.from_user
     now = get_beijing_time()
+    
     conn = sqlite3.connect('stats.db')
     conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name, bj_time, chat_id, worker_id, worker_name) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (link, f_name, change_val, update.effective_user.full_name, now, chat_id, worker.id, worker.full_name))
@@ -146,6 +144,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"🎯 **{status}成功**\n━━━━━━━━━━━━━━\n"
         f"👤 **做单人:** [{worker.full_name}](tg://user?id={worker.id})\n"
         f"🌐 **链接:** `{link}`\n"
+        f"📦 **包号:** `{f_name}`\n"
         f"🔢 **变动:** `{update.message.text}`\n"
         f"💰 **当前总余额:** `{new_balance}`\n"
         f"⏰ **时间:** `{now}`", parse_mode='Markdown'
@@ -159,14 +158,14 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     links = conn.execute('SELECT link, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
     workers = conn.execute('SELECT worker_name, worker_id, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY worker_id ORDER BY SUM(final_val) DESC', (chat_id,)).fetchall()
     conn.close()
-    if not links: return await update.message.reply_text("📭 本群暂无统计记录")
+    if not links: return await update.message.reply_text("📭 本群暂无统计")
     
     report = f"📋 **本群总报表**\n🕒 `{get_beijing_time()}`\n\n🌐 **链接汇总：**\n"
-    total = sum(r[1] for r in links)
+    total_val = sum(r[1] for r in links)
     for r in links: report += f"• `{r[0]}`: **{r[1]}**\n"
     report += f"\n🏆 **资金排名：**\n"
     for w in workers: report += f"• [{w[0]}](tg://user?id={w[1]}): **{w[2]}**\n"
-    report += f"━━━━━━━━━━━━━━\n🌟 **累计总计：{total}**"
+    report += f"━━━━━━━━━━━━━━\n🌟 **总计金额：{total_val}**"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -174,17 +173,23 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
     parts = update.message.text.split()
     if len(parts) < 2: return
-    link_query = parts[1]
+    link_target = parts[1]
     conn = sqlite3.connect('stats.db')
-    rows = conn.execute('SELECT file_name, final_val, worker_name, worker_id FROM admin_confirmed WHERE chat_id = ? AND link = ? ORDER BY id ASC', (chat_id, link_query)).fetchall()
+    rows = conn.execute('SELECT file_name, final_val, worker_name, worker_id FROM admin_confirmed WHERE chat_id = ? AND link = ? ORDER BY id ASC', (chat_id, link_target)).fetchall()
     conn.close()
-    if not rows: return await update.message.reply_text(f"📭 `{link_query}` 无记录")
+    if not rows: return await update.message.reply_text(f"📭 `{link_target}` 无记录")
     
-    report = f"📊 **明细表：{link_query}**\n总计：**{sum(r[1] for r in rows)}**\n━━━━━━━━━━━━━━\n"
+    report = f"📊 **明细记录：{link_target}**\n总计：**{sum(r[1] for r in rows)}**\n━━━━━━━━━━━━━━\n"
     for r in rows:
         mark = "➕" if r[1] > 0 else "➖"
-        report += f"{mark} `{r[0][:10]}` | **{r[1]}** | [{r[2]}](tg://user?id={r[3]})\n"
+        report += f"{mark} `{r[0][:12]}` | **{r[1]}** | [{r[2]}](tg://user?id={r[3]})\n"
     await update.message.reply_text(report[:4000], parse_mode='Markdown')
+
+async def check_my_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not is_chat_authorized(chat_id): return
+    balance = get_worker_balance(chat_id, update.effective_user.id)
+    await update.message.reply_text(f"💰 **您的资金余额**\n━━━━━━━━━━━━━━\n👤 **用户:** {update.effective_user.full_name}\n💵 **余额:** `{balance}`", parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id, update.effective_chat.id): return
@@ -192,11 +197,11 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("🗑 **本群账目已清空，资金归零。**")
+    await update.message.reply_text("🗑 **账目已清空，本群资金已重置归零。**")
 
 def main():
     init_db()
-    # 增强版配置：增加超时时间防止网络波动导致报错
+    # 针对 TimedOut 错误进行了超时优化设置
     app = Application.builder() \
         .token(BOT_TOKEN) \
         .connect_timeout(30) \
@@ -213,7 +218,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_data))
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
     
-    print("🚀 机器人正在运行中...")
+    print("🚀 机器人正在运行，网络优化已开启...")
     app.run_polling()
 
 if __name__ == '__main__': main()
