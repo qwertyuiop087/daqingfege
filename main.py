@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ================= 配置区 =================
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"  # 填入 Token
-MY_ID = 6042965834            # 填入你的数字 ID
+MY_ID = 6042965834             # 填入你的数字 ID
 # ==========================================
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -15,10 +15,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
+    # 记录表：存储加单(+)和减单(-)的结果
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
         admin_name TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    # 管理员权限表
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, name TEXT)''')
     conn.commit()
     conn.close()
@@ -33,7 +35,7 @@ def is_admin(user_id):
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("💡 请回复对方的消息发送 /add")
+        return await update.message.reply_text("💡 请回复对方消息发送 /add")
     target = update.message.reply_to_message.from_user
     conn = sqlite3.connect('stats.db')
     conn.execute('INSERT OR REPLACE INTO admins (user_id, name) VALUES (?, ?)', (target.id, target.full_name))
@@ -41,56 +43,79 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"👑 已授权新管理员：{target.full_name}")
 
-async def handle_admin_plus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理管理员回复 +数字 或 -数字"""
     if not is_admin(update.effective_user.id) or not update.message.reply_to_message:
         return
 
-    admin_text = update.message.text.strip()
+    action_text = update.message.text.strip() # "+100" 或 "-50"
     source_text = update.message.reply_to_message.text
     if not source_text: return
 
-    # --- 改进的解析逻辑 ---
-    
-    # 1. 提取链接 (依然认 .vip)
+    # 1. 提取链接
     link_match = re.search(r"([a-zA-Z0-9-]+\.vip)", source_text)
-    if not link_match:
-        return await update.message.reply_text("❌ 无法识别 .vip 链接。")
+    if not link_match: return
     link = link_match.group(1)
 
-    # 2. 提取包号 (新逻辑)
-    # 优先找“包号：xxxx”或者“包号: xxxx”
-    file_match = re.search(r"包号[：:]\s*([^\n]+)", source_text)
-    if file_match:
-        f_name = file_match.group(1).strip()
-    else:
-        # 如果没写“包号”两个字，就看有没有包含 .txt 的字眼
-        txt_match = re.search(r"([^\s]+\.txt)", source_text)
-        if txt_match:
-            f_name = txt_match.group(1)
-        else:
-            # 如果还是没有，就取第一行前20个字作为代称
-            f_name = source_text.split('\n')[0][:20].strip()
+    # 2. 提取多行包号
+    file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
+    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else source_text.split('\n')[0][:30].strip()
 
-    # 3. 提取管理员输入的数字
-    val_match = re.search(r"^\+(\d+)$", admin_text)
+    # 3. 提取数字（支持正负号）
+    # 匹配 +123 或 -123
+    val_match = re.search(r"^([+-])(\d+)$", action_text)
     if not val_match: return
-    final_val = int(val_match.group(1))
 
-    # --- 存储 ---
+    sign, num = val_match.group(1), int(val_match.group(2))
+    final_val = num if sign == '+' else -num # 如果是减号，存为负数
+
+    # 4. 存储
     conn = sqlite3.connect('stats.db')
     conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name) 
                     VALUES (?, ?, ?, ?)''', (link, f_name, final_val, update.effective_user.full_name))
     conn.commit()
     conn.close()
 
+    status = "加单" if sign == '+' else "减单"
     await update.message.reply_text(
-        f"✅ **管理员加单成功**\n"
+        f"✅ **管理员{status}成功**\n"
         f"🔗 链接: `{link}`\n"
         f"📄 包号: `{f_name}`\n"
-        f"💰 加单数: `{final_val}`"
+        f"🔢 变动数: `{final_val}`"
     )
 
+async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """统计全部链接"""
+    if not is_admin(update.effective_user.id): return
+    
+    conn = sqlite3.connect('stats.db')
+    # 按链接分组汇总
+    rows = conn.execute('SELECT link, SUM(final_val), COUNT(id) FROM admin_confirmed GROUP BY link').fetchall()
+    conn.close()
+
+    if not rows: return await update.message.reply_text("📭 暂无任何统计数据")
+
+    total_all = 0
+    report = "📋 **所有链接汇总报表**\n━━━━━━━━━━━━━━\n"
+    for row in rows:
+        report += f"🌐 `{row[0]}`: **{row[1]}** ({row[2]}笔)\n"
+        total_all += row[1]
+    
+    report += f"━━━━━━━━━━━━━━\n总计总数量：**{total_all}**"
+    await update.message.reply_text(report, parse_mode='Markdown')
+
+async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """清空所有统计数据（仅限超级管理员）"""
+    if update.effective_user.id != MY_ID: return
+    
+    conn = sqlite3.connect('stats.db')
+    conn.execute('DELETE FROM admin_confirmed')
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("🗑 **所有链接统计数据已清空！**")
+
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查询单个链接明细"""
     if not is_admin(update.effective_user.id): return
     parts = update.message.text.split()
     if len(parts) < 2: return
@@ -103,19 +128,28 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows: return await update.message.reply_text(f"📭 `{link}` 暂无记录")
 
     total_sum = sum(r[1] for r in rows)
-    report = f"📊 **{link} 统计结果**\n━━━━━━━━━━━━━━\n"
-    report += f"💰 加单总额: **{total_sum}**\n"
-    report += f"📦 总组数: {len(rows)}\n\n**最近明细：**\n"
-    for r in rows[-10:]:
-        report += f"✅ `{r[0]}` | +{r[1]} | {r[2][5:16]}\n"
+    report = f"📊 **单链明细: {link}**\n"
+    report += f"💰 当前总额: **{total_sum}**\n\n**最近变动：**\n"
+    for r in rows[-8:]:
+        mark = "✅" if r[1] > 0 else "❌"
+        report += f"{mark} `{r[0][:15]}` | {r[1]} | {r[2][11:16]}\n"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # 权限
     app.add_handler(CommandHandler("add", add_admin))
-    app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^\+\d+$"), handle_admin_plus))
+    app.add_handler(CommandHandler("clear_all", clear_data))
+    
+    # 核心动作：回复 +数字 或 -数字
+    app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
+    
+    # 查询指令
+    app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
     app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), handle_query))
+    
     app.run_polling()
 
 if __name__ == '__main__':
