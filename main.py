@@ -1,85 +1,84 @@
 import telebot
 import re
 from datetime import datetime
+import time
 
-# ========== 在这里直接粘贴你的TG机器人Token ==========
+# 你的机器人Token直接写这里
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
-# =====================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 order_list = []
 
-# 识别图片文案 + 普通文字交单
+# 兼容图片+文字所有交单
 @bot.message_handler(content_types=['photo', 'text'])
-def handle_order(msg):
-    content = msg.caption if msg.photo else msg.text
-    if not content:
+def auto_save(message):
+    text = message.caption if message.photo else message.text
+    if not text:
         return
 
-    # 提取完整包号全名，不简写、不改成第几组
-    pack_match = re.search(r'包号[:：]\s*([^\n]+)', content)
-    pack_name = pack_match.group(1).strip() if pack_match else "未知包号"
+    # 完整包号原名
+    pack = re.search(r'包号[:：]\s*([^\n]+)', text)
+    pack_name = pack.group(1).strip() if pack else "未知包"
 
-    # 智能提取成功数量，完全无视失败数据
-    suc = re.findall(r'成功[:：]\s*(\d+)|过\s*(\d+)|出单\s*(\d+)', content)
-    all_num = re.findall(r'\d+', content)
+    # 只提取成功，无视失败
+    suc_num = re.findall(r'成功[:：]\s*(\d+)', text)
+    nums = re.findall(r'\d+', text)
 
     success = 0
-    if suc:
-        success = int(next(x for x in suc[0] if x))
-    elif len(all_num) >= 1:
-        success = int(all_num[-1])
+    if suc_num:
+        success = int(suc_num[0])
+    elif nums:
+        success = int(nums[0])
 
-    # 提取vip站点链接
-    link_match = re.search(r'([a-zA-Z0-9]+\.vip)', content)
-    link = link_match.group(1) if link_match else "未知链接"
+    # 提取vip链接
+    link = re.search(r'([a-zA-Z0-9]+\.vip)', text)
+    link_name = link.group(1) if link else "无链接"
 
-    # 记录北京时间
-    now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    order_list.append({"link":link_name,"pack":pack_name,"num":success,"time":now})
 
-    order_list.append({
-        "link": link,
-        "pack": pack_name,
-        "num": success,
-        "time": now_time
-    })
+# 统计指令
+@bot.message_handler(func=lambda msg: True)
+def stat(msg):
+    if not msg.text.startswith("统计"):
+        return
 
-# 统计指令：统计 95506.vip 北京时间 08:00-23:00
-@bot.message_handler(func=lambda m: m.text.startswith("统计"))
-def stat_report(msg):
     text = msg.text
-
     link_res = re.search(r'([a-zA-Z0-9]+\.vip)', text)
     if not link_res:
-        bot.reply_to(msg, "请带上要统计的VIP链接")
+        bot.reply_to(msg,"请格式：统计 95506.vip 北京时间 00:00-23:59")
         return
-    target_link = link_res.group(1)
 
     time_res = re.search(r'北京时间\s*(\d+:\d+)-(\d+:\d+)', text)
     if not time_res:
-        bot.reply_to(msg, "格式：统计 95506.vip 北京时间 00:00-24:直接复制整段")
+        bot.reply_to(msg,"请带上时间段：北京时间 xx:xx-xx:xx")
         return
-    start, end = time_res.groups()
 
-    pack_total = {}
-    sum_all = 0
+    l = link_res.group(1)
+    s,e = time_res.groups()
 
-    for item in order_list:
-        if item["link"] != target_link:
+    pack_sum = {}
+    total = 0
+    for d in order_list:
+        if d["link"] != l:
             continue
-        pack = item["pack"]
-        pack_total[pack] = pack_total.get(pack, 0) + item["num"]
-        sum_all += item["num"]
+        pack_sum[d["pack"]] = pack_sum.get(d["pack"],0) + d["num"]
+        total += d["num"]
 
-    out = f"""📊 链接交单统计报表
-链接：{target_link}
-统计时段：北京时间 {start} - {end}
+    reply = f"""📊 交单统计
+链接：{l}
+时段：北京时间 {s} - {e}
 
 """
-    for pk, cnt in pack_total.items():
-        out += f"{pk} ：{cnt}\n"
+    for pk, cnt in pack_sum.items():
+        reply += f"{pk}：{cnt}\n"
+    reply += f"\n总计成功：{total}"
+    bot.reply_to(msg, reply)
 
-    out += f"\n📈 本时段累计成功总数：{sum_all}"
-    bot.reply_to(msg, out)
-
-bot.polling(none_stop=True)
+# Railway防掉线永久循环
+while True:
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(e)
+        time.sleep(5)
