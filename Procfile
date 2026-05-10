@@ -1,1 +1,1 @@
-worker: python main.py
+pyTelegramBotAPI==4.24.0
