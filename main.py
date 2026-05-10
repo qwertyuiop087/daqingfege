@@ -15,7 +15,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
-    # 存储最终确认的加减单数据
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
@@ -43,39 +42,24 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👑 已授权新管理员：{target.full_name}")
 
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理管理员回复 +数字 或 -数字"""
     if not is_admin(update.effective_user.id) or not update.message.reply_to_message:
         return
-
     action_text = update.message.text.strip()
     source_text = update.message.reply_to_message.text
     if not source_text: return
-
-    # 1. 提取链接
     link_match = re.search(r"([a-zA-Z0-9-]+\.vip)", source_text)
     if not link_match: return
     link = link_match.group(1)
-
-    # 2. 提取多行包号 (优化后的抓取逻辑)
     file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
-    if file_block_match:
-        f_name = " ".join(file_block_match.group(1).strip().split())
-    else:
-        f_name = source_text.split('\n')[0][:30].strip()
-
-    # 3. 提取数字（支持 + 和 -）
+    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else source_text.split('\n')[0][:30].strip()
     val_match = re.search(r"^([+-])(\d+)$", action_text)
     if not val_match: return
-
     sign, num = val_match.group(1), int(val_match.group(2))
     final_val = num if sign == '+' else -num
-
     conn = sqlite3.connect('stats.db')
-    conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name) 
-                    VALUES (?, ?, ?, ?)''', (link, f_name, final_val, update.effective_user.full_name))
+    conn.execute('INSERT INTO admin_confirmed (link, file_name, final_val, admin_name) VALUES (?, ?, ?, ?)', (link, f_name, final_val, update.effective_user.full_name))
     conn.commit()
     conn.close()
-
     status = "加单" if sign == '+' else "减单"
     await update.message.reply_text(f"✅ **{status}成功**\n🔗 `{link}`\n📄 `{f_name[:20]}`\n🔢 数值: `{final_val}`")
 
@@ -84,9 +68,7 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('stats.db')
     rows = conn.execute('SELECT link, SUM(final_val), COUNT(id) FROM admin_confirmed GROUP BY link').fetchall()
     conn.close()
-
     if not rows: return await update.message.reply_text("📭 暂无统计数据")
-
     total_all = 0
     report = "📋 **所有链接汇总**\n━━━━━━━━━━━━━━\n"
     for row in rows:
@@ -108,13 +90,10 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = update.message.text.split()
     if len(parts) < 2: return
     link = parts[1]
-    
     conn = sqlite3.connect('stats.db')
     rows = conn.execute('SELECT file_name, final_val, timestamp FROM admin_confirmed WHERE link = ?', (link,)).fetchall()
     conn.close()
-
     if not rows: return await update.message.reply_text(f"📭 `{link}` 暂无记录")
-
     total_sum = sum(r[1] for r in rows)
     report = f"📊 **明细: {link}**\n当前总额: **{total_sum}**\n\n"
     for r in rows[-8:]:
@@ -130,9 +109,7 @@ def main():
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
     app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), handle_query))
-    print("机器人已启动...")
     app.run_polling()
 
-# 这里是修复后的关键点！前后都是两个下划线
 if __name__ == '__main__':
     main()
