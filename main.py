@@ -52,15 +52,17 @@ def is_chat_authorized(chat_id):
 
 # --- 3. 权限指令 ---
 async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """主管理员授权群聊"""
     if update.effective_user.id != MY_ID: return
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"✅ **本群授权成功！**\n数据已隔离，现在可以开始统计。")
+    await update.message.reply_text(f"✅ **本群授权成功！**\n管理员现在可以开始操作。")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """主管理员授权其他管理员"""
     if update.effective_user.id != MY_ID: return
     if not update.message.reply_to_message:
         return await update.message.reply_text("💡 请回复对方的消息并发送 授权")
@@ -69,13 +71,13 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('INSERT OR REPLACE INTO admins (user_id, name) VALUES (?, ?)', (target.id, target.full_name))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"👑 已成功授权管理员：{target.full_name}")
+    await update.message.reply_text(f"👑 已授权新管理员：{target.full_name}")
 
-# --- 4. 核心逻辑：加减单 (恢复可复制格式) ---
+# --- 4. 核心逻辑：加减单 ---
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not is_chat_authorized(chat_id): return
-    if not is_admin(update.effective_user.id) or not update.message.reply_to_message: return
+    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id): return
+    if not update.message.reply_to_message: return
 
     action_text = update.message.text.strip()
     source_text = update.message.reply_to_message.text
@@ -100,7 +102,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.close()
 
     status = "加单成功" if sign == '+' else "减单成功"
-    # 这里加了反引号，保证可以点击复制
     response = (
         f"🎯 **管理员{status}**\n"
         f"━━━━━━━━━━━━━━\n"
@@ -112,7 +113,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     await update.message.reply_text(response, parse_mode='Markdown')
 
-# --- 5. 查询逻辑 ---
+# --- 5. 查询与清空 (现在管理员可清空) ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id): return
@@ -130,13 +131,16 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != MY_ID: return
+    """【更新】管理员也可以清空本群数据"""
     chat_id = update.effective_chat.id
+    # 只要是管理员且群已授权，就可以执行
+    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id): return
+    
     conn = sqlite3.connect('stats.db')
     conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"🗑 **本群统计记录已清空！**")
+    await update.message.reply_text(f"🗑 **本群统计记录已清空！**\n操作人：{update.effective_user.first_name}")
 
 def main():
     init_db()
