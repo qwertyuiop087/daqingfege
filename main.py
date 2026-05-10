@@ -24,18 +24,15 @@ def extract_link_smartly(text):
     if all_numbers: return f"{all_numbers[-1]}.vip", True
     return None, False
 
-# --- 2. 数据库逻辑 (新增群授权表和群ID字段) ---
+# --- 2. 数据库逻辑 ---
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
-    # 增加 chat_id 字段用于数据隔离
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
         admin_name TEXT, bj_time TEXT, chat_id INTEGER)''')
-    # 管理员权限表
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, name TEXT)''')
-    # 新增：已授权的群聊表
     cursor.execute('''CREATE TABLE IF NOT EXISTS authorized_chats (chat_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
@@ -55,17 +52,15 @@ def is_chat_authorized(chat_id):
 
 # --- 3. 权限指令 ---
 async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """主管理员授权当前群聊使用机器人"""
     if update.effective_user.id != MY_ID: return
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"✅ **群聊授权成功！**\n本群数据已独立，现在可以开始统计了。\n群ID: `{chat_id}`")
+    await update.message.reply_text(f"✅ **本群授权成功！**\n数据已隔离，现在可以开始统计。")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """授权管理员 (主管理员可用)"""
     if update.effective_user.id != MY_ID: return
     if not update.message.reply_to_message:
         return await update.message.reply_text("💡 请回复对方的消息并发送 授权")
@@ -76,12 +71,10 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text(f"👑 已成功授权管理员：{target.full_name}")
 
-# --- 4. 核心逻辑：加减单 (带群隔离) ---
+# --- 4. 核心逻辑：加减单 (恢复可复制格式) ---
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    # 检查群是否授权
     if not is_chat_authorized(chat_id): return
-    # 检查是否是管理员
     if not is_admin(update.effective_user.id) or not update.message.reply_to_message: return
 
     action_text = update.message.text.strip()
@@ -98,39 +91,45 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not val_match: return
     sign, num = val_match.group(1), int(val_match.group(2))
     final_val = num if sign == '+' else -num
+    now_time = get_beijing_time()
     
     conn = sqlite3.connect('stats.db')
     conn.execute('INSERT INTO admin_confirmed (link, file_name, final_val, admin_name, bj_time, chat_id) VALUES (?, ?, ?, ?, ?, ?)', 
-                 (link, f_name, final_val, update.effective_user.full_name, get_beijing_time(), chat_id))
+                 (link, f_name, final_val, update.effective_user.full_name, now_time, chat_id))
     conn.commit()
     conn.close()
 
     status = "加单成功" if sign == '+' else "减单成功"
-    link_info = f"`{link}` (补全)" if is_auto else f"`{link}`"
-    await update.message.reply_text(f"🎯 **管理员{status}**\n━━━━━━━━━━━━━━\n🌐 链接: {link_info}\n📦 包号: `{f_name}`\n🔢 变动: `{action_text}`\n⏰ 时间: `{get_beijing_time()}`")
+    # 这里加了反引号，保证可以点击复制
+    response = (
+        f"🎯 **管理员{status}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🌐 **链接:** `{link}`\n"
+        f"📦 **包号:** `{f_name}`\n"
+        f"🔢 **变动:** `{action_text}`\n"
+        f"⏰ **时间:** `{now_time}`\n"
+        f"👤 **操作:** {update.effective_user.first_name}"
+    )
+    await update.message.reply_text(response, parse_mode='Markdown')
 
-# --- 5. 查询逻辑 (仅显示本群数据) ---
+# --- 5. 查询逻辑 ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id): return
-
     conn = sqlite3.connect('stats.db')
-    # 只查询当前群 chat_id 的数据
     rows = conn.execute('SELECT link, SUM(final_val), COUNT(id) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
     conn.close()
-
     if not rows: return await update.message.reply_text("📭 本群暂无统计数据")
     
+    report = f"📋 **本群汇总报表**\n🕒 `{get_beijing_time()}`\n━━━━━━━━━━━━━━\n"
     total_all = 0
-    report = f"📋 **本群独立汇总报表**\n🕒 时间：`{get_beijing_time()}`\n━━━━━━━━━━━━━━\n"
     for row in rows:
-        report += f"🌐 `{row[0]}`\n累计数量：**{row[1]}** ({row[2]}笔)\n\n"
+        report += f"🌐 `{row[0]}`: **{row[1]}**\n"
         total_all += row[1]
     report += f"━━━━━━━━━━━━━━\n🌟 **总计总数量：{total_all}**"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """仅清空本群数据"""
     if update.effective_user.id != MY_ID: return
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
@@ -142,15 +141,11 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    # 指令注册
-    app.add_handler(MessageHandler(filters.Regex(r"^授权群聊$"), auth_chat)) # 新增
+    app.add_handler(MessageHandler(filters.Regex(r"^授权群聊$"), auth_chat))
     app.add_handler(MessageHandler(filters.Regex(r"^(授权|/auth)$"), add_admin))
     app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_data))
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
-    
-    print("机器人已启动 (隔离授权版)...")
     app.run_polling()
 
 if __name__ == '__main__':
