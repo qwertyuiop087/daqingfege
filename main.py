@@ -28,15 +28,15 @@ def extract_link_smartly(text):
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
-    # 统计数据表
+    # admin_confirmed 存储所有账单明细和对应的加减数值
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
         admin_name TEXT, bj_time TEXT, chat_id INTEGER)''')
-    # 【更新】管理员表：增加 chat_id 实现权限隔离
+    # 管理员权限表 (带群隔离)
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (
         user_id INTEGER, chat_id INTEGER, name TEXT, PRIMARY KEY (user_id, chat_id))''')
-    # 群授权表
+    # 群授权激活表
     cursor.execute('''CREATE TABLE IF NOT EXISTS authorized_chats (chat_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
@@ -54,7 +54,7 @@ def is_chat_authorized(chat_id):
     conn.close()
     return True if res else False
 
-# --- 3. 权限指令 (仅主管理员可用) ---
+# --- 3. 权限指令 (主管理员专享) ---
 async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
     chat_id = update.effective_chat.id
@@ -62,10 +62,9 @@ async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"✅ **本群服务已开启**\n权限与数据均已实现本群隔离。")
+    await update.message.reply_text(f"✅ **本群服务已开启**\n数据与权限已实现本群隔离。")
 
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """停止本群服务并清空数据"""
     if update.effective_user.id != MY_ID: return
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
@@ -74,12 +73,12 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('DELETE FROM admins WHERE chat_id = ?', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"🚫 **本群服务已停止**\n所有权限及统计数据已清空。")
+    await update.message.reply_text(f"🚫 **服务已关停**\n本群所有权限、统计及账单记录已彻底清除。")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("💡 请回复对方的消息发送 授权")
+        return await update.message.reply_text("💡 请回复对方发送 授权")
     target = update.message.reply_to_message.from_user
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
@@ -89,10 +88,9 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👑 已授权 **{target.full_name}** 为本群管理员。")
 
 async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """取消管理员权限"""
     if update.effective_user.id != MY_ID: return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("💡 请回复对方的消息发送 取消管理员")
+        return await update.message.reply_text("💡 请回复对方发送 取消管理员")
     target = update.message.reply_to_message.from_user
     chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
@@ -114,7 +112,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not link: return
 
     file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
-    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else "未识别包号"
+    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else "明细记录"
 
     val_match = re.search(r"^([+-])(\d+)$", action_text)
     if not val_match: return
@@ -136,14 +134,15 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"👤 **操作:** {update.effective_user.first_name}", parse_mode='Markdown'
     )
 
+# --- 5. 查询与彻底清空 ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
     conn = sqlite3.connect('stats.db')
     rows = conn.execute('SELECT link, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
     conn.close()
-    if not rows: return await update.message.reply_text("📭 本群暂无统计。")
-    report = f"📋 **本群汇总报表**\n🕒 `{get_beijing_time()}`\n━━━━━━━━━━━━━━\n"
+    if not rows: return await update.message.reply_text("📭 本群暂无统计记录。")
+    report = f"📋 **本群实时汇总报表**\n🕒 `{get_beijing_time()}`\n━━━━━━━━━━━━━━\n"
     total = 0
     for row in rows:
         report += f"🌐 `{row[0]}`: **{row[1]}**\n"
@@ -152,13 +151,16 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """彻底清空本群统计及账单明细"""
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
+    
     conn = sqlite3.connect('stats.db')
+    # 删除该群在 admin_confirmed 表中的所有行，这将同时清空总额和所有包号记录
     conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"🗑 **本群数据已清空。**")
+    await update.message.reply_text(f"🗑 **本群统计与账单明细已全部清空！**\n操作人：{update.effective_user.first_name}")
 
 def main():
     init_db()
