@@ -37,7 +37,7 @@ def auto_extract_filenames(text):
             found_items.append(clean_line.strip())
     return ", ".join(found_items) if found_items else "手工调账"
 
-# --- 数据库 ---
+# --- 数据库操作 ---
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
@@ -75,7 +75,7 @@ async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("✅ **本群已授权**")
+    await update.message.reply_text("✅ **本群服务已授权**")
 
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
@@ -83,7 +83,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('DELETE FROM authorized_chats WHERE chat_id = ?', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("🚫 **服务已停止**")
+    await update.message.reply_text("🚫 **本群服务已停止**")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID or not update.message.reply_to_message: return
@@ -150,12 +150,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"━━━━━━━━━━━━━━\n⏰ {now}", parse_mode='Markdown'
     )
 
-# --- 统计汇总（带总数统计） ---
-async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_chat_authorized(update.effective_chat.id): return
-    bal = get_worker_balance(update.effective_chat.id, update.effective_user.id)
-    await update.message.reply_text(f"💰 [{update.effective_user.full_name}](tg://user?id={update.effective_user.id}) 余额: `{bal}`", parse_mode='Markdown')
-
+# --- 汇总报表（带总和） ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
@@ -172,26 +167,68 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += f"• `{r[0]}`: **{r[1]}**\n"
         total_sum += r[1]
     
-    # 核心：显示全部链接总和
     report += f"━━━━━━━━━━━━━━\n🌟 **全部链接总计：{total_sum}**\n━━━━━━━━━━━━━━\n"
-    
     report += f"\n🏆 **排名汇总 (点击跳转)：**\n"
     for w in workers:
         report += f"• [{w[0]}](tg://user?id={w[1]}): **{w[2]}**\n"
-        
     await update.message.reply_text(report, parse_mode='Markdown')
+
+# --- 核心：单链接明细统计 ---
+async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
+    
+    # 提取查询关键词（如：统计 a.vip）
+    parts = update.message.text.split()
+    if len(parts) < 2: return await update.message.reply_text("❌ 请输入正确格式，例如：`统计 a.vip`")
+    target = parts[1]
+
+    conn = sqlite3.connect('stats.db')
+    rows = conn.execute('''SELECT file_name, final_val, worker_name, worker_id, bj_time 
+                           FROM admin_confirmed 
+                           WHERE chat_id = ? AND link LIKE ? 
+                           ORDER BY id DESC''', (chat_id, f"%{target}%")).fetchall()
+    conn.close()
+    
+    if not rows: return await update.message.reply_text(f"📭 链接 `{target}` 暂无明细记录")
+
+    report = f"📊 **明细记录: {target}**\n━━━━━━━━━━━━━━\n"
+    for r in rows:
+        mark = "➕" if r[1] > 0 else "➖"
+        # 完整包号 + 跳转名字 + 时间
+        report += f"{mark} `{r[0]}` | **{r[1]}**\n👤 [{r[2]}](tg://user?id={r[3]}) | ⏰ {r[4].split()[1]}\n\n"
+
+    # 分段发送，防止消息超长
+    if len(report) > 4000:
+        await update.message.reply_text(report[:4000], parse_mode='Markdown')
+        await update.message.reply_text(report[4000:], parse_mode='Markdown')
+    else:
+        await update.message.reply_text(report, parse_mode='Markdown')
+
+async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_chat_authorized(update.effective_chat.id): return
+    bal = get_worker_balance(update.effective_chat.id, update.effective_user.id)
+    await update.message.reply_text(f"💰 [{update.effective_user.full_name}](tg://user?id={update.effective_user.id}) 余额: `{bal}`", parse_mode='Markdown')
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
+    
+    # 权限指令
     app.add_handler(MessageHandler(filters.Regex(r"^授权群聊$"), auth_chat))
     app.add_handler(MessageHandler(filters.Regex(r"^停止本群服务$"), stop_chat))
     app.add_handler(MessageHandler(filters.Regex(r"^授权管理员$"), add_admin))
     app.add_handler(MessageHandler(filters.Regex(r"^取消管理员$"), remove_admin))
     app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_all))
+    
+    # 查询指令
     app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
+    app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), query_link_detail)) # 回归的功能
+    
+    # 录入指令
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
+    
     app.run_polling()
 
 if __name__ == '__main__': main()
