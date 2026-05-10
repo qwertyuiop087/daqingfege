@@ -15,12 +15,11 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
-    # 记录表：存储加单(+)和减单(-)的结果
+    # 存储最终确认的加减单数据
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
         admin_name TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    # 管理员权限表
     cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY, name TEXT)''')
     conn.commit()
     conn.close()
@@ -48,7 +47,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_admin(update.effective_user.id) or not update.message.reply_to_message:
         return
 
-    action_text = update.message.text.strip() # "+100" 或 "-50"
+    action_text = update.message.text.strip()
     source_text = update.message.reply_to_message.text
     if not source_text: return
 
@@ -57,19 +56,20 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not link_match: return
     link = link_match.group(1)
 
-    # 2. 提取多行包号
+    # 2. 提取多行包号 (优化后的抓取逻辑)
     file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
-    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else source_text.split('\n')[0][:30].strip()
+    if file_block_match:
+        f_name = " ".join(file_block_match.group(1).strip().split())
+    else:
+        f_name = source_text.split('\n')[0][:30].strip()
 
-    # 3. 提取数字（支持正负号）
-    # 匹配 +123 或 -123
+    # 3. 提取数字（支持 + 和 -）
     val_match = re.search(r"^([+-])(\d+)$", action_text)
     if not val_match: return
 
     sign, num = val_match.group(1), int(val_match.group(2))
-    final_val = num if sign == '+' else -num # 如果是减号，存为负数
+    final_val = num if sign == '+' else -num
 
-    # 4. 存储
     conn = sqlite3.connect('stats.db')
     conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name) 
                     VALUES (?, ?, ?, ?)''', (link, f_name, final_val, update.effective_user.full_name))
@@ -77,45 +77,33 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.close()
 
     status = "加单" if sign == '+' else "减单"
-    await update.message.reply_text(
-        f"✅ **管理员{status}成功**\n"
-        f"🔗 链接: `{link}`\n"
-        f"📄 包号: `{f_name}`\n"
-        f"🔢 变动数: `{final_val}`"
-    )
+    await update.message.reply_text(f"✅ **{status}成功**\n🔗 `{link}`\n📄 `{f_name[:20]}`\n🔢 数值: `{final_val}`")
 
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """统计全部链接"""
     if not is_admin(update.effective_user.id): return
-    
     conn = sqlite3.connect('stats.db')
-    # 按链接分组汇总
     rows = conn.execute('SELECT link, SUM(final_val), COUNT(id) FROM admin_confirmed GROUP BY link').fetchall()
     conn.close()
 
-    if not rows: return await update.message.reply_text("📭 暂无任何统计数据")
+    if not rows: return await update.message.reply_text("📭 暂无统计数据")
 
     total_all = 0
-    report = "📋 **所有链接汇总报表**\n━━━━━━━━━━━━━━\n"
+    report = "📋 **所有链接汇总**\n━━━━━━━━━━━━━━\n"
     for row in rows:
-        report += f"🌐 `{row[0]}`: **{row[1]}** ({row[2]}笔)\n"
+        report += f"🌐 `{row[0]}`: **{row[1]}**\n"
         total_all += row[1]
-    
     report += f"━━━━━━━━━━━━━━\n总计总数量：**{total_all}**"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """清空所有统计数据（仅限超级管理员）"""
     if update.effective_user.id != MY_ID: return
-    
     conn = sqlite3.connect('stats.db')
     conn.execute('DELETE FROM admin_confirmed')
     conn.commit()
     conn.close()
-    await update.message.reply_text("🗑 **所有链接统计数据已清空！**")
+    await update.message.reply_text("🗑 **所有数据已清空！**")
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查询单个链接明细"""
     if not is_admin(update.effective_user.id): return
     parts = update.message.text.split()
     if len(parts) < 2: return
@@ -128,29 +116,23 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows: return await update.message.reply_text(f"📭 `{link}` 暂无记录")
 
     total_sum = sum(r[1] for r in rows)
-    report = f"📊 **单链明细: {link}**\n"
-    report += f"💰 当前总额: **{total_sum}**\n\n**最近变动：**\n"
+    report = f"📊 **明细: {link}**\n当前总额: **{total_sum}**\n\n"
     for r in rows[-8:]:
         mark = "✅" if r[1] > 0 else "❌"
-        report += f"{mark} `{r[0][:15]}` | {r[1]} | {r[2][11:16]}\n"
+        report += f"{mark} `{r[0][:15]}` | {r[1]}\n"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    # 权限
     app.add_handler(CommandHandler("add", add_admin))
     app.add_handler(CommandHandler("clear_all", clear_data))
-    
-    # 核心动作：回复 +数字 或 -数字
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
-    
-    # 查询指令
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
     app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), handle_query))
-    
+    print("机器人已启动...")
     app.run_polling()
 
+# 这里是修复后的关键点！前后都是两个下划线
 if __name__ == '__main__':
     main()
