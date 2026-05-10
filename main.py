@@ -6,13 +6,12 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ================= 配置区 =================
-BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"  # 填入你的 Token
-MY_ID = 6042965834             # 填入你的数字 ID (主管理员)
+BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
+MY_ID = 6042965834
 # ==========================================
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- 1. 工具函数 ---
 def get_beijing_time():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -24,19 +23,16 @@ def extract_link_smartly(text):
     if all_numbers: return f"{all_numbers[-1]}.vip", True
     return None, False
 
-# --- 2. 数据库初始化 ---
+# --- 数据库初始化 (新增做单人字段) ---
 def init_db():
     conn = sqlite3.connect('stats.db')
     cursor = conn.cursor()
-    # admin_confirmed 存储所有账单明细和对应的加减数值
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         link TEXT, file_name TEXT, final_val INTEGER,
-        admin_name TEXT, bj_time TEXT, chat_id INTEGER)''')
-    # 管理员权限表 (带群隔离)
-    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (
-        user_id INTEGER, chat_id INTEGER, name TEXT, PRIMARY KEY (user_id, chat_id))''')
-    # 群授权激活表
+        admin_name TEXT, bj_time TEXT, chat_id INTEGER,
+        worker_id INTEGER, worker_name TEXT)''') # 新增：做单人ID和名字
+    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER, chat_id INTEGER, name TEXT, PRIMARY KEY (user_id, chat_id))''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS authorized_chats (chat_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
@@ -54,123 +50,109 @@ def is_chat_authorized(chat_id):
     conn.close()
     return True if res else False
 
-# --- 3. 权限指令 (主管理员专享) ---
+# --- 权限指令 ---
 async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
-    chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
-    conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (chat_id,))
+    conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"✅ **本群服务已开启**\n数据与权限已实现本群隔离。")
-
-async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != MY_ID: return
-    chat_id = update.effective_chat.id
-    conn = sqlite3.connect('stats.db')
-    conn.execute('DELETE FROM authorized_chats WHERE chat_id = ?', (chat_id,))
-    conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
-    conn.execute('DELETE FROM admins WHERE chat_id = ?', (chat_id,))
-    conn.commit()
-    conn.close()
-    await update.message.reply_text(f"🚫 **服务已关停**\n本群所有权限、统计及账单记录已彻底清除。")
+    await update.message.reply_text("✅ 本群服务已开启（含员工统计功能）")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != MY_ID: return
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("💡 请回复对方发送 授权")
+    if update.effective_user.id != MY_ID or not update.message.reply_to_message: return
     target = update.message.reply_to_message.from_user
-    chat_id = update.effective_chat.id
     conn = sqlite3.connect('stats.db')
-    conn.execute('INSERT OR REPLACE INTO admins (user_id, chat_id, name) VALUES (?, ?, ?)', (target.id, chat_id, target.full_name))
+    conn.execute('INSERT OR REPLACE INTO admins (user_id, chat_id, name) VALUES (?, ?, ?)', (target.id, update.effective_chat.id, target.full_name))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"👑 已授权 **{target.full_name}** 为本群管理员。")
+    await update.message.reply_text(f"👑 已授权 {target.full_name} 为本群管理员")
 
-async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != MY_ID: return
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("💡 请回复对方发送 取消管理员")
-    target = update.message.reply_to_message.from_user
-    chat_id = update.effective_chat.id
-    conn = sqlite3.connect('stats.db')
-    conn.execute('DELETE FROM admins WHERE user_id = ? AND chat_id = ?', (target.id, chat_id))
-    conn.commit()
-    conn.close()
-    await update.message.reply_text(f"❌ 已撤销 **{target.full_name}** 的本群管理员权限。")
-
-# --- 4. 统计逻辑 ---
+# --- 核心：加减单逻辑 ---
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if not is_chat_authorized(chat_id) or not is_admin(user_id, chat_id): return
-    if not update.message.reply_to_message: return
+    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
+    
+    reply_msg = update.message.reply_to_message
+    if not reply_msg or not reply_msg.text: return
 
-    action_text = update.message.text.strip()
-    source_text = update.message.reply_to_message.text
-    link, is_auto = extract_link_smartly(source_text)
+    # 识别链接
+    link, is_auto = extract_link_smartly(reply_msg.text)
     if not link: return
 
-    file_block_match = re.search(r"包号[：:](.*?)(?=手机号|成功|数量|失败|$)", source_text, re.DOTALL)
-    f_name = " ".join(file_block_match.group(1).strip().split()) if file_block_match else "明细记录"
+    # 获取做单人信息 (被回复的人)
+    worker = reply_msg.from_user
+    worker_id = worker.id
+    worker_name = worker.full_name
 
-    val_match = re.search(r"^([+-])(\d+)$", action_text)
+    # 提取数值
+    val_match = re.search(r"^([+-])(\d+)$", update.message.text.strip())
     if not val_match: return
-    sign, num = val_match.group(1), int(val_match.group(2))
-    final_val = num if sign == '+' else -num
-    now_time = get_beijing_time()
+    final_val = int(val_match.group(2)) if val_match.group(1) == '+' else -int(val_match.group(2))
     
+    now_time = get_beijing_time()
     conn = sqlite3.connect('stats.db')
-    conn.execute('INSERT INTO admin_confirmed (link, file_name, final_val, admin_name, bj_time, chat_id) VALUES (?, ?, ?, ?, ?, ?)', 
-                 (link, f_name, final_val, update.effective_user.full_name, now_time, chat_id))
+    conn.execute('''INSERT INTO admin_confirmed 
+                 (link, file_name, final_val, admin_name, bj_time, chat_id, worker_id, worker_name) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                 (link, "自动识别", final_val, update.effective_user.full_name, now_time, chat_id, worker_id, worker_name))
     conn.commit()
     conn.close()
 
-    status = "加单成功" if sign == '+' else "减单成功"
+    status = "加单" if final_val > 0 else "减单"
     await update.message.reply_text(
-        f"🎯 **管理员{status}**\n━━━━━━━━━━━━━━\n"
-        f"🌐 **链接:** `{link}`\n📦 **包号:** `{f_name}`\n"
-        f"🔢 **变动:** `{action_text}`\n⏰ **时间:** `{now_time}`\n"
-        f"👤 **操作:** {update.effective_user.first_name}", parse_mode='Markdown'
+        f"🎯 **{status}成功**\n━━━━━━━━━━━━━━\n"
+        f"👤 **做单人:** [{worker_name}](tg://user?id={worker_id})\n"
+        f"🌐 **链接:** `{link}`\n"
+        f"🔢 **变动:** `{update.message.text}`\n"
+        f"⏰ **时间:** `{now_time}`", parse_mode='Markdown'
     )
 
-# --- 5. 查询与彻底清空 ---
+# --- 查询：统计全部 (按链接和按人) ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
+    
     conn = sqlite3.connect('stats.db')
-    rows = conn.execute('SELECT link, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
+    # 1. 链接汇总
+    link_rows = conn.execute('SELECT link, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
+    # 2. 员工汇总 (按数值降序)
+    worker_rows = conn.execute('SELECT worker_name, worker_id, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY worker_id ORDER BY SUM(final_val) DESC', (chat_id,)).fetchall()
     conn.close()
-    if not rows: return await update.message.reply_text("📭 本群暂无统计记录。")
-    report = f"📋 **本群实时汇总报表**\n🕒 `{get_beijing_time()}`\n━━━━━━━━━━━━━━\n"
-    total = 0
-    for row in rows:
-        report += f"🌐 `{row[0]}`: **{row[1]}**\n"
-        total += row[1]
-    report += f"━━━━━━━━━━━━━━\n🌟 **总计：{total}**"
+
+    if not link_rows: return await update.message.reply_text("📭 本群暂无统计。")
+
+    report = f"📋 **本群实时报表**\n🕒 `{get_beijing_time()}`\n\n"
+    report += "🌐 **链接汇总：**\n"
+    total_all = 0
+    for r in link_rows:
+        report += f"• `{r[0]}`: **{r[1]}**\n"
+        total_all += r[1]
+    
+    report += f"\n🏆 **员工战绩：**\n"
+    for w in worker_rows:
+        # 名字变为可点击的链接
+        report += f"• [{w[0]}](tg://user?id={w[1]}): **{w[2]}**\n"
+    
+    report += f"━━━━━━━━━━━━━━\n🌟 **总计总额：{total_all}**"
     await update.message.reply_text(report, parse_mode='Markdown')
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """彻底清空本群统计及账单明细"""
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
-    
     conn = sqlite3.connect('stats.db')
-    # 删除该群在 admin_confirmed 表中的所有行，这将同时清空总额和所有包号记录
     conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text(f"🗑 **本群统计与账单明细已全部清空！**\n操作人：{update.effective_user.first_name}")
+    await update.message.reply_text("🗑 **已清空本群所有数据（包括链接和员工统计）**")
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.Regex(r"^授权群聊$"), auth_chat))
-    app.add_handler(MessageHandler(filters.Regex(r"^停止本群服务$"), stop_chat))
     app.add_handler(MessageHandler(filters.Regex(r"^(授权|/auth)$"), add_admin))
-    app.add_handler(MessageHandler(filters.Regex(r"^取消管理员$"), remove_admin))
-    app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_data))
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
+    app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_data))
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
     app.run_polling()
 
