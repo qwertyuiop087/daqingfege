@@ -68,7 +68,7 @@ async def auth_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("✅ **本群已成功授权**")
+    await update.message.reply_text("✅ **本群服务已授权**")
 
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID: return
@@ -76,7 +76,7 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.execute('DELETE FROM authorized_chats WHERE chat_id = ?', (update.effective_chat.id,))
     conn.commit()
     conn.close()
-    await update.message.reply_text("🚫 **已停止本群服务**")
+    await update.message.reply_text("🚫 **本群服务已停止**")
 
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MY_ID or not update.message.reply_to_message: return
@@ -104,7 +104,7 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text("🗑 **所有数据已清空归零**")
 
-# --- 核心：录入回执与回扣提醒 ---
+# --- 核心录入与回扣回溯 ---
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, chat_id): return
@@ -121,14 +121,13 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     worker = reply_msg.from_user
     now = get_beijing_time()
-    
     if not link: link = "余额调账"
 
     conn = sqlite3.connect('stats.db')
     conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name, bj_time, chat_id, worker_id, worker_name) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (link, f_name, change_val, update.effective_user.full_name, now, chat_id, worker.id, worker.full_name))
     
-    # 顺便查询该员工做过的历史链接用于提醒
+    # 回溯做单记录
     history = conn.execute('SELECT DISTINCT link FROM admin_confirmed WHERE chat_id = ? AND worker_id = ? AND final_val > 0', (chat_id, worker.id)).fetchall()
     conn.commit()
     conn.close()
@@ -147,7 +146,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"━━━━━━━━━━━━━━\n⏰ {now}", parse_mode='Markdown'
     )
 
-# --- 统计报表 ---
+# --- 统计报表 (包含单链接统计) ---
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = get_worker_balance(update.effective_chat.id, update.effective_user.id)
     await update.message.reply_text(f"💰 [{update.effective_user.full_name}](tg://user?id={update.effective_user.id}) 余额: `{bal}`", parse_mode='Markdown')
@@ -159,11 +158,27 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workers = conn.execute('SELECT worker_name, worker_id, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY worker_id ORDER BY SUM(final_val) DESC', (update.effective_chat.id,)).fetchall()
     conn.close()
     
-    report = f"📋 **本群总报表**\n\n🌐 **链接汇总：**\n"
+    report = f"📋 **总报表**\n\n🌐 **链接汇总：**\n"
     for r in links: report += f"• `{r[0]}`: **{r[1]}**\n"
     report += f"\n🏆 **排名汇总 (点击跳转)：**\n"
     for w in workers: report += f"• [{w[0]}](tg://user?id={w[1]}): **{w[2]}**\n"
     await update.message.reply_text(report, parse_mode='Markdown')
+
+async def query_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """这里是您要的单链接明细功能"""
+    parts = update.message.text.split()
+    if len(parts) < 2: return
+    target = parts[1]
+    conn = sqlite3.connect('stats.db')
+    rows = conn.execute('SELECT file_name, final_val, worker_name, worker_id, bj_time FROM admin_confirmed WHERE chat_id = ? AND link LIKE ?', (update.effective_chat.id, f"%{target}%")).fetchall()
+    conn.close()
+    if not rows: return await update.message.reply_text(f"📭 链接 `{target}` 暂无明细")
+    
+    report = f"📊 **明细: {target}**\n━━━━━━━━━━━━━━\n"
+    for r in rows:
+        mark = "➕" if r[1] > 0 else "➖"
+        report += f"{mark} `{r[0]}` | **{r[1]}**\n👤 [{r[2]}](tg://user?id={r[3]}) | ⏰ {r[4].split()[1]}\n\n"
+    await update.message.reply_text(report[:4000], parse_mode='Markdown')
 
 def main():
     init_db()
@@ -176,6 +191,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_all))
     app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
     app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
+    app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), query_link)) # 单链接统计
     app.add_handler(MessageHandler(filters.REPLY & filters.Regex(r"^[+-]\d+$"), handle_admin_action))
     
     app.run_polling()
