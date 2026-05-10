@@ -4,7 +4,7 @@ from datetime import datetime
 import time
 
 # 你的Token直接填这里
-TOKEN = "这里粘贴你的机器人Token"
+TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
 
 bot = telebot.TeleBot(TOKEN, parse_mode=None)
 data = []
