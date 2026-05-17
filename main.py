@@ -17,21 +17,27 @@ def get_beijing_time():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 识别与提取逻辑 ---
+# --- 【彻底修复 Bug】识别与提取逻辑 ---
 def extract_link_smartly(text):
     if not text: return None
+    
+    # 动态匹配任意合法的网址后缀（如 .com, .vip, .top, .net, .org 等）
     url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", text)
     if url_match: 
         return url_match.group(1).lower()
-    all_numbers = re.findall(r"\d{4,8}", text)
-    if all_numbers: 
-        return f"单号_{all_numbers[-1]}"
+        
+    # 【严重Bug修复】彻底砍掉之前的数字补全和盲猜逻辑！
+    # 如果消息里没有带合法后缀的网址，这里直接返回 None，后面会统一归类到 "手动录入"
     return None
 
 def auto_extract_filenames(text):
     start_match = re.search(r"(包号|编号|单反)[：:](.*?)(?=手机|尾号|数量|话术|送达|用浏览器|$)", text, re.DOTALL)
     if not start_match: 
-        return None if len(text.strip()) < 10 else text.split('\n')[0][:50].strip()
+        # 如果没有“包号：”关键字，但消息很长（比如转发的完整单子），截取第一行
+        # 如果是直接发的指令如 "+100 大晴_20"，msg_text 去了前面的 +100，剩下的就是包号
+        clean_text = re.sub(r"^[+-]\d+\s*", "", text).strip()
+        return clean_text[:50] if clean_text else "未指定包号"
+        
     raw_content = start_match.group(2).strip()
     found_items = []
     for line in raw_content.split('\n'):
@@ -41,25 +47,13 @@ def auto_extract_filenames(text):
             found_items.append(clean_line.strip())
     return ", ".join(found_items) if found_items else None
 
-# --- 【核心排序辅助函数】 ---
+# --- 排序辅助函数 ---
 def sort_by_package_number(row):
-    """
-    row 结构: (file_name, final_val, worker_name, worker_id, bj_time)
-    提取包号（file_name）末尾的数字进行排序。例如 "大晴_20" -> 提取出 20
-    """
     file_name = row[0]
-    if not file_name:
-        return (1, "") # 没包号的排在最后
-    
-    # 匹配字符串末尾的连续数字（例如 _20, -21, 或者是末尾的纯数字）
+    if not file_name: return (1, "")
     num_match = re.search(r"(\d+)\s*$", file_name)
-    if num_match:
-        # 返回 (0, 数字)，0 用于确保有数字的排在前面，数字用于按大小排序
-        return (0, int(num_match.group(1)))
-    
-    # 如果包号里没数字，返回文本本身进行字母排序
+    if num_match: return (0, int(num_match.group(1)))
     return (1, file_name)
-
 
 # --- 数据库操作 ---
 def init_db():
@@ -99,9 +93,10 @@ async def handle_direct_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     change_val = int(val_match.group(2)) if val_match.group(1) == '+' else -int(val_match.group(2))
     reply_msg = update.message.reply_to_message
 
+    # 判定误触：如果没有回复任何人，且当前消息里除了数字指令啥都没写，就无视
     link_in_msg = extract_link_smartly(msg_text)
-    file_in_msg = auto_extract_filenames(msg_text)
-    if not reply_msg and not link_in_msg and not file_in_msg: return 
+    clean_cmd_check = re.sub(r"^[^\s]*", "", msg_text).strip() # 看看除指令外有没有跟文本
+    if not reply_msg and not link_in_msg and not clean_cmd_check: return 
 
     if reply_msg:
         target_worker = reply_msg.from_user
@@ -110,6 +105,7 @@ async def handle_direct_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_worker = admin_user
         source_text = msg_text
 
+    # 提取：没有网址就严格打入"手动录入"，绝对不能污染 link 字段
     final_link = extract_link_smartly(source_text) or "手动录入"
     final_f_name = auto_extract_filenames(source_text) or "手动录入"
     now = get_beijing_time()
@@ -135,7 +131,7 @@ async def handle_direct_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode='Markdown'
     )
 
-# --- 报表统计 ---
+# --- 报表与统计 ---
 async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
@@ -155,7 +151,6 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_message(chat_id=chat_id, text=report, parse_mode='Markdown')
 
-# --- 【已更新】单独链接明细统计 (支持编号自动排序) ---
 async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
@@ -170,11 +165,9 @@ async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         return await context.bot.send_message(chat_id=chat_id, text=f"📭 链接 `{target}` 暂无明细记录")
 
-    # 【关键改动】使用自定义排序函数，将数据按照包号末尾的数字从小到大排列
-    # 如果想从大到小排列，可以改为: sorted(rows, key=sort_by_package_number, reverse=True)
     sorted_rows = sorted(rows, key=sort_by_package_number)
 
-    report = f"📊 **明细记录 (按包号编号排序): {target}**\n━━━━━━━━━━━━━━\n"
+    report = f"📊 **明细记录: {target}**\n━━━━━━━━━━━━━━\n"
     for r in sorted_rows:
         mark = "➕" if r[1] > 0 else "➖"
         report += f"{mark} `{r[0]}` | **{r[1]}**\n👤 [{r[2]}](tg://user?id={r[3]}) | ⏰ {r[4].split()[1]}\n\n"
@@ -228,29 +221,4 @@ async def service_management(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
     await context.bot.send_message(chat_id=chat_id, text=text)
 
-async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_admin(update.effective_user.id, chat_id): return
-    conn = sqlite3.connect('stats.db')
-    conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
-    conn.commit()
-    conn.close()
-    await context.bot.send_message(chat_id=chat_id, text="🗑 **本群数据已清空归零**")
-
-def main():
-    init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(MessageHandler(filters.Regex(r"^(授权群聊|停止本群服务)$"), service_management))
-    app.add_handler(MessageHandler(filters.Regex(r"^(授权管理员|取消管理员)$"), admin_management))
-    app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
-    app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), query_link_detail))
-    app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_all))
-    app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
-    app.add_handler(MessageHandler(filters.Regex(r"^[+-]\d+"), handle_direct_entry))
-    
-    print("🚀 机器人已启动 (支持包号数字排序版)...")
-    app.run_polling()
-
-if __name__ == '__main__': 
-    main()
+async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE
