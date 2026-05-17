@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ================= 配置区 =================
+# ================= 配置区（已帮你精准填入） =================
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
 MY_ID = 6042965834  # 你的数字ID
 # ==========================================
@@ -17,15 +17,15 @@ def get_beijing_time():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 识别与提取逻辑 ---
+# --- 严格的网址识别逻辑 ---
 def extract_link_smartly(text):
     if not text: return None
+    
+    # 只严格匹配带有点和2-4位字母后缀的真正网址（如 a.vip, test.com, abc.top 等）
     url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", text)
     if url_match: 
         return url_match.group(1).lower()
-    all_numbers = re.findall(r"\d{4,8}", text)
-    if all_numbers: 
-        return f"单号_{all_numbers[-1]}"
+        
     return None
 
 def auto_extract_filenames(text):
@@ -145,7 +145,7 @@ async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_message(chat_id=chat_id, text=report, parse_mode='Markdown')
 
-# --- 单独链接明细统计 (已修复右括号丢失Bug) ---
+# --- 单独链接明细统计 ---
 async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
@@ -167,7 +167,6 @@ async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mark = "➕" if r[1] > 0 else "➖"
         report += f"{mark} `{r[0]}` | **{r[1]}**\n👤 [{r[2]}](tg://user?id={r[3]}) | ⏰ {r[4].split()[1]}\n\n"
     
-    # 【Bug 已修复】：这里之前少了一个结束的右括号 )
     await context.bot.send_message(chat_id=chat_id, text=report[:4000], parse_mode='Markdown')
 
 # --- 资金查询与管理 ---
@@ -238,7 +237,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
     app.add_handler(MessageHandler(filters.Regex(r"^[+-]\d+"), handle_direct_entry))
     
-    print("🚀 机器人已成功启动 (所有Bug已完全修复)...")
+    print("🚀 机器人已全面启动 (参数已填，进入完美运行状态)...")
     app.run_polling()
 
 if __name__ == '__main__': 
