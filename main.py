@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ================= 配置区（已帮你精准填入） =================
+# ================= 配置区 =================
 BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
 MY_ID = 6042965834  # 你的数字ID
 # ==========================================
@@ -17,12 +17,20 @@ def get_beijing_time():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 严格的网址识别逻辑 ---
+# --- 【彻底重构】只识别最后两行的网址 ---
 def extract_link_smartly(text):
     if not text: return None
     
-    # 只严格匹配带有点和2-4位字母后缀的真正网址（如 a.vip, test.com, abc.top 等）
-    url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", text)
+    # 1. 把整段文字按行切开，去掉空行
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if not lines: return None
+    
+    # 2. 只取最后两行（如果总共只有一行就取一行）
+    last_two_lines = lines[-2:] if len(lines) >= 2 else lines
+    last_two_text = "\n".join(last_two_lines)
+    
+    # 3. 严格在这最后两行里，匹配带有 2-4 位字母后缀的真正网址
+    url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", last_two_text)
     if url_match: 
         return url_match.group(1).lower()
         
@@ -237,7 +245,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
     app.add_handler(MessageHandler(filters.Regex(r"^[+-]\d+"), handle_direct_entry))
     
-    print("🚀 机器人已全面启动 (参数已填，进入完美运行状态)...")
+    print("🚀 机器人已启动 (精准定位最后两行网址)...")
     app.run_polling()
 
 if __name__ == '__main__': 
