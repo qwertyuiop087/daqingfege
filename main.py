@@ -1,14 +1,24 @@
 import re
 import sqlite3
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ================= 配置区 =================
-BOT_TOKEN = "8740680706:AAE-lmCkHNebFidQO0fvKIsxtJ2vSiJc9M0"
-MY_ID = 6042965834  # 你的数字ID
-# ==========================================
+# ================= 从环境变量读取配置（无硬编码密钥） =================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+MY_ID_STR = os.getenv("MY_ID", "0")
+try:
+    MY_ID = int(MY_ID_STR)
+except ValueError:
+    MY_ID = 0
+# ===================================================================
+
+# 校验关键变量
+if not BOT_TOKEN or MY_ID == 0:
+    print("错误：请在环境变量配置 BOT_TOKEN 和 MY_ID")
+    exit()
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -17,19 +27,16 @@ def get_beijing_time():
     tz = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 【彻底重构】只识别最后两行的网址 ---
+# --- 只识别最后两行的网址 ---
 def extract_link_smartly(text):
     if not text: return None
     
-    # 1. 把整段文字按行切开，去掉空行
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if not lines: return None
     
-    # 2. 只取最后两行（如果总共只有一行就取一行）
     last_two_lines = lines[-2:] if len(lines) >= 2 else lines
     last_two_text = "\n".join(last_two_lines)
     
-    # 3. 严格在这最后两行里，匹配带有 2-4 位字母后缀的真正网址
     url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", last_two_text)
     if url_match: 
         return url_match.group(1).lower()
