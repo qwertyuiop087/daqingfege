@@ -1,48 +1,55 @@
 import os
-import random
 import time
 import zipfile
-import re
 import threading
+import shutil
+import secrets
+import uuid
 from io import BytesIO
+from flask import Flask, request, render_template, send_file, abort
 from PIL import Image
 import telebot
-from telebot.types import InputMediaDocument, InputMediaPhoto
+from telebot.types import InputMediaDocument
 from datetime import datetime, timezone, timedelta
 from telebot.apihelper import ApiException
 
-# ===================== 读取 Railway 环境变量 =====================
+# ===================== 读取环境变量 =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+PORT = int(os.getenv("PORT", "8080"))
 
-# 业务价格配置
-PRICE_SPLIT = 0.0005      # 图片分包单价（每张）
-PRICE_COMPRESS = 0.0003   # 图片压缩单价（每张）— 可自行调整
-BATCH_SIZE = 10           # 每批发送图片数
-PAGE_NUM = 20
+# ===================== 业务配置 =====================
+PRICE_SPLIT = 0.0005          # 每张图片分包费用
+PRICE_COMPRESS = 0.0003       # 每张图片压缩费用（可选）
 TG_API_DELAY = 1.2
-TG_GROUP_DELAY = 2.5
-OP_TIMEOUT = 180          # 操作超时3分钟
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 单张图片最大10MB
-COMPRESS_QUALITY = 85     # 压缩质量
+MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 单张图片最大10MB
+MAX_ZIP_SIZE = 500 * 1024 * 1024    # 网页上传最大500MB
+MAX_IMAGES_IN_ZIP = 1000            # ZIP内图片数量上限
+COMPRESS_QUALITY = 85
+UPLOAD_FOLDER = "/tmp/uploads"
+OUTPUT_FOLDER = "/tmp/outputs"
+WEB_TOKEN_EXPIRE = 1800             # 上传链接有效期（秒），30分钟
 
-# 全局数据
-users = {}
-cards = {}
-time_cards = {}
-user_state = {}
-user_images = {}          # 存储用户上传的图片数据
-user_image_groups = {}    # 存储图片分组
-log_user = {}
-log_recharge = {}
+# 确保目录存在
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# ===================== 全局数据 =====================
+users = {}               # 用户数据
+cards = {}               # 余额卡密
+time_cards = {}          # 时长卡密
+user_state = {}          # 用户操作状态
+log_user = {}            # 消费日志
+log_recharge = {}        # 充值日志
+user_web_tokens = {}     # token -> {"uid": uid, "expire": timestamp}
 
 # ===================== 工具函数 =====================
 def get_user(uid):
     if uid not in users:
         users[uid] = {
             "balance": 0.0,
-            "mode": "original",  # original=原图, compressed=压缩
-            "images_per_group": 10,  # 每组图片数
+            "mode": "original",
+            "images_per_group": 10,
             "vip_expire": 0
         }
     return users[uid]
@@ -52,22 +59,13 @@ def is_admin(uid):
 
 def is_vip_valid(uid):
     u = get_user(uid)
-    now = int(time.time())
-    return u["vip_expire"] > now
+    return u["vip_expire"] > int(time.time())
 
-def get_vip_expire_time_str(uid):
-    u = get_user(uid)
-    now = int(time.time())
-    if u["vip_expire"] <= now:
-        return "已过期/未开通"
-    return datetime.fromtimestamp(u["vip_expire"], tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+def get_beijing_time_str():
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
 
-def get_vip_days_remaining(uid):
-    u = get_user(uid)
-    now = int(time.time())
-    if u["vip_expire"] <= now:
-        return 0
-    return (u["vip_expire"] - now) // 86400
+def get_now_timestamp():
+    return int(time.time())
 
 def add_log(uid, txt, num, cost):
     t = get_beijing_time_str()
@@ -80,12 +78,6 @@ def add_rc(uid, money):
     if uid not in log_recharge:
         log_recharge[uid] = []
     log_recharge[uid].insert(0, f"[{t}]｜充值+{money:.4f}｜剩余{get_user(uid)['balance']:.4f}")
-
-def get_beijing_time_str():
-    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-
-def get_now_timestamp():
-    return int(time.time())
 
 def safe_send_msg(chat_id, text, retry=3):
     for i in range(retry):
@@ -102,11 +94,13 @@ def safe_send_msg(chat_id, text, retry=3):
             continue
     return False
 
-def safe_send_media_group(chat_id, media_list, retry=3):
+def safe_send_document(chat_id, file_path, retry=3):
+    """从磁盘路径发送文档，带重试"""
     for i in range(retry):
         try:
-            time.sleep(TG_GROUP_DELAY)
-            bot.send_media_group(chat_id, media_list)
+            time.sleep(TG_API_DELAY)
+            with open(file_path, 'rb') as f:
+                bot.send_document(chat_id, f)
             return True
         except ApiException as e:
             if "429" in str(e):
@@ -118,10 +112,9 @@ def safe_send_media_group(chat_id, media_list, retry=3):
     return False
 
 def compress_image(image_bytes, quality=COMPRESS_QUALITY, max_size=MAX_IMAGE_SIZE):
-    """压缩图片"""
+    """压缩图片，返回字节"""
     try:
         img = Image.open(BytesIO(image_bytes))
-        # 转换为RGB（处理PNG透明背景）
         if img.mode in ('RGBA', 'LA', 'P'):
             rgba = img.convert('RGBA')
             background = Image.new('RGB', rgba.size, (255, 255, 255))
@@ -132,35 +125,18 @@ def compress_image(image_bytes, quality=COMPRESS_QUALITY, max_size=MAX_IMAGE_SIZ
 
         output = BytesIO()
         img.save(output, format='JPEG', quality=quality, optimize=True)
-
-        # 如果还是太大，继续降低质量
         current_quality = quality
         while output.tell() > max_size and current_quality > 30:
             current_quality -= 10
             output = BytesIO()
             img.save(output, format='JPEG', quality=current_quality, optimize=True)
-
         return output.getvalue()
-    except Exception as e:
+    except:
         return None
-
-def process_image_batch(image_data_list, mode='original'):
-    """处理一批图片"""
-    processed = []
-    for img_data in image_data_list:
-        if mode == 'compressed':
-            compressed = compress_image(img_data)
-            if compressed:
-                processed.append(compressed)
-            else:
-                processed.append(img_data)  # 压缩失败用原图
-        else:
-            processed.append(img_data)
-    return processed
 
 # ===================== 机器人初始化 =====================
 if not BOT_TOKEN or ADMIN_ID == 0:
-    print("错误：请在 Railway 环境变量配置 BOT_TOKEN 和 ADMIN_ID")
+    print("错误：请在环境变量配置 BOT_TOKEN 和 ADMIN_ID")
     exit()
 
 bot = telebot.TeleBot(BOT_TOKEN, skip_pending=True)
@@ -174,6 +150,7 @@ def menu(uid):
     kb.add(telebot.types.InlineKeyboardButton("👤个人中心", callback_data="user"))
     kb.add(telebot.types.InlineKeyboardButton("💳卡密充值", callback_data="cdk_use"))
     kb.add(telebot.types.InlineKeyboardButton("🖼️开始分包", callback_data="start_split"))
+    kb.add(telebot.types.InlineKeyboardButton("🌐大文件上传", callback_data="web_upload"))
     if is_admin(uid):
         kb.add(telebot.types.InlineKeyboardButton("🔧管理后台", callback_data="admin"))
     return kb
@@ -197,80 +174,168 @@ def admin_kb():
     kb.add(telebot.types.InlineKeyboardButton("🔙返回", callback_data="back"))
     return kb
 
-# ===================== 图片分包核心逻辑 =====================
-def split_images(uid, cid, images_data, images_names):
-    """图片分包主逻辑"""
-    u = get_user(uid)
-    total_images = len(images_data)
-    fee = total_images * PRICE_SPLIT
-
-    # 检查余额
-    if not is_vip_valid(uid):
-        if u['balance'] < fee:
-            safe_send_msg(cid, f"❌余额不足｜需要{fee:.4f}元｜当前{u['balance']:.4f}元")
-            return
-        safe_send_msg(cid, f"✅余额校验通过，图片总数：{total_images}张，开始分包...")
-    else:
-        safe_send_msg(cid, f"✅VIP用户免余额校验，图片总数：{total_images}张，开始分包...")
-
-    # 处理图片（压缩或原图）
-    processed_images = process_image_batch(images_data, u['mode'])
-
-    # 分组
-    groups = [processed_images[i:i+u['images_per_group']] for i in range(0, len(processed_images), u['images_per_group'])]
-    name_groups = [images_names[i:i+u['images_per_group']] for i in range(0, len(images_names), u['images_per_group'])]
-
-    # 发送图片组
-    send_success = True
-    for idx, (img_group, name_group) in enumerate(zip(groups, name_groups), 1):
-        media = []
-        for img_data, img_name in zip(img_group, name_group):
-            bio = BytesIO(img_data)
-            bio.name = img_name if img_name else f"image_{idx}.jpg"
-            media.append(InputMediaDocument(bio))
-
-        safe_send_msg(cid, f"📤正在发送第{idx}组｜图片 {len(img_group)}张")
-        if not safe_send_media_group(cid, media):
-            send_success = False
-            break
-
-    # 扣费
-    if send_success:
-        if not is_vip_valid(uid):
-            u['balance'] -= fee
-            add_log(uid, f"图片分包｜每组{u['images_per_group']}张", total_images, fee)
-
-        if is_vip_valid(uid):
-            safe_send_msg(cid, f"✅图片分包完成（VIP免费）｜共{len(groups)}组")
-        else:
-            safe_send_msg(cid, f"✅图片分包完成｜扣费{fee:.4f}元｜剩余{u['balance']:.4f}元｜共{len(groups)}组")
-    else:
-        safe_send_msg(cid, "❌发送失败，本次不扣费，请重试！")
-
-    # 清理
-    if uid in user_images:
-        del user_images[uid]
-    if uid in user_image_groups:
-        del user_image_groups[uid]
-
-def process_zip_images(zip_bytes):
-    """从ZIP中提取图片"""
-    images = []
-    names = []
+# ===================== 核心处理函数（从文件路径读取）=====================
+def process_zip_file(zip_path, mode='original', group_size=10):
+    """
+    处理ZIP文件，按组打包成新的ZIP，返回输出ZIP文件路径列表。
+    mode: 'original' 或 'compressed'
+    group_size: 每组图片数量
+    """
+    # 解压ZIP到临时目录
+    extract_dir = os.path.join(UPLOAD_FOLDER, f"extract_{int(time.time())}_{uuid.uuid4().hex[:6]}")
+    os.makedirs(extract_dir, exist_ok=True)
+    image_files = []
     try:
-        with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
             for file_name in zf.namelist():
                 if file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')):
-                    with zf.open(file_name) as f:
-                        img_data = f.read()
-                        if len(img_data) <= MAX_IMAGE_SIZE:
-                            images.append(img_data)
-                            names.append(os.path.basename(file_name))
-    except Exception:
-        pass
-    return images, names
+                    # 解压单个文件
+                    target_path = os.path.join(extract_dir, os.path.basename(file_name))
+                    with zf.open(file_name) as source, open(target_path, 'wb') as target:
+                        shutil.copyfileobj(source, target)
+                    if os.path.getsize(target_path) <= MAX_IMAGE_SIZE:
+                        image_files.append(target_path)
+                    else:
+                        os.remove(target_path)
+                    if len(image_files) >= MAX_IMAGES_IN_ZIP:
+                        break
+    except Exception as e:
+        print(f"解压ZIP失败: {e}")
+        return []
 
-# ===================== 回调事件 =====================
+    if not image_files:
+        return []
+
+    # 按组分组
+    groups = [image_files[i:i+group_size] for i in range(0, len(image_files), group_size)]
+    output_zips = []
+    for idx, group in enumerate(groups, 1):
+        out_zip_name = f"分包_{idx}_{uuid.uuid4().hex[:8]}.zip"
+        out_zip_path = os.path.join(OUTPUT_FOLDER, out_zip_name)
+        with zipfile.ZipFile(out_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf_out:
+            for img_path in group:
+                if mode == 'compressed':
+                    with open(img_path, 'rb') as f:
+                        img_bytes = f.read()
+                    compressed = compress_image(img_bytes)
+                    if compressed:
+                        base = os.path.splitext(os.path.basename(img_path))[0]
+                        zf_out.writestr(f"{base}.jpg", compressed)
+                    else:
+                        zf_out.write(img_path, os.path.basename(img_path))
+                else:
+                    zf_out.write(img_path, os.path.basename(img_path))
+        output_zips.append(out_zip_path)
+
+    # 清理解压目录
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    return output_zips
+
+# ===================== Flask Web应用 =====================
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = MAX_ZIP_SIZE
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload():
+    token = request.args.get('token', '')
+    # 验证token
+    token_info = user_web_tokens.get(token)
+    if not token_info:
+        abort(401, "无效的上传链接")
+    if token_info['expire'] < time.time():
+        del user_web_tokens[token]
+        abort(401, "链接已过期，请重新获取")
+
+    uid = token_info['uid']
+    u = get_user(uid)
+
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            return render_template('upload.html', error='没有选择文件', token=token)
+        file = request.files['file']
+        if file.filename == '':
+            return render_template('upload.html', error='文件名为空', token=token)
+
+        # 检查用户余额（非VIP）
+        if not is_vip_valid(uid):
+            # 先粗略检查：文件大小无法确定图片数量，只能等处理后再扣费
+            # 但我们可以先检查余额是否至少大于一个很小的值，防止空文件
+            if u['balance'] <= 0:
+                return render_template('upload.html', error='余额不足，请先充值', token=token)
+
+        # 保存上传的文件
+        upload_path = os.path.join(UPLOAD_FOLDER, f"upload_{uid}_{int(time.time())}_{uuid.uuid4().hex[:6]}.zip")
+        file.save(upload_path)
+
+        # 获取处理参数
+        mode = request.form.get('mode', 'original')
+        group_size = int(request.form.get('group_size', 10))
+        if group_size < 1 or group_size > 100:
+            group_size = 10
+
+        # 处理文件
+        output_zips = process_zip_file(upload_path, mode, group_size)
+        os.remove(upload_path)
+
+        if not output_zips:
+            return render_template('upload.html', error='处理失败，请检查文件格式或内容', token=token)
+
+        # 统计图片总数（从输出ZIP中获取，或者重新计算）
+        # 更准确：从 process_zip_file 返回的图片数量，但我们现在简化：每个ZIP里的图片数量乘以ZIP数量
+        # 这里我们直接传入 group_size 和 len(output_zips) 来估算总图片数
+        total_images = 0
+        for zpath in output_zips:
+            with zipfile.ZipFile(zpath, 'r') as zf:
+                total_images += len([name for name in zf.namelist() if name.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.webp'))])
+
+        # 计算费用
+        fee = total_images * PRICE_SPLIT
+
+        # 检查余额并扣费
+        if not is_vip_valid(uid):
+            if u['balance'] < fee:
+                # 余额不足，删除已生成的ZIP，返回错误
+                for zpath in output_zips:
+                    os.remove(zpath)
+                return render_template('upload.html', error=f'余额不足，需要 {fee:.4f} 元，当前余额 {u["balance"]:.4f} 元，请先充值', token=token)
+            u['balance'] -= fee
+            add_log(uid, f"网页图片分包ZIP｜每组{group_size}张", total_images, fee)
+        else:
+            # VIP 免费
+            fee = 0.0
+
+        # 生成下载链接
+        links = []
+        for zpath in output_zips:
+            filename = os.path.basename(zpath)
+            links.append(f'<a href="/download/{filename}">{filename}</a>')
+
+        result_html = '<br>'.join(links)
+
+        # 通过 Telegram 通知用户
+        bot_msg = f"✅ 网页上传处理完成\n图片总数：{total_images}张\n分组：{len(output_zips)}个ZIP文件\n"
+        if fee > 0:
+            bot_msg += f"扣费：{fee:.4f}元\n剩余余额：{u['balance']:.4f}元\n"
+        else:
+            bot_msg += "VIP免费处理\n"
+        bot_msg += "下载链接：\n" + "\n".join([f"https://{request.host}/download/{os.path.basename(p)}" for p in output_zips])
+        safe_send_msg(uid, bot_msg)
+
+        return render_template('upload.html', message=f'处理成功，共 {len(output_zips)} 个ZIP文件，下载链接已发送到您的 Telegram，也可以点击下载：<br>{result_html}', token=token)
+
+    return render_template('upload.html', token=token)
+
+@app.route('/download/<filename>')
+def download(filename):
+    # 防止路径遍历
+    if '..' in filename or filename.startswith('/'):
+        abort(404)
+    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    if not os.path.exists(file_path):
+        abort(404)
+    return send_file(file_path, as_attachment=True)
+
+# ===================== 机器人回调事件 =====================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     uid = call.from_user.id
@@ -284,18 +349,36 @@ def callback_handler(call):
         bot.edit_message_text("✅图片模式已切换", cid, call.message.message_id, reply_markup=menu(uid))
 
     elif data == "group_size":
-        bot.send_message(cid, "📦请输入每组图片数量（纯数字，建议5-20张）")
+        bot.send_message(cid, "📦请输入每组图片数量（纯数字，建议5-50张）")
         def set_group_size(m):
-            if m.text.isdigit() and 1 <= int(m.text) <= 50:
+            if m.text.isdigit() and 1 <= int(m.text) <= 100:
                 get_user(uid)["images_per_group"] = int(m.text)
                 bot.send_message(cid, "✅每组图片数设置完成", reply_markup=menu(uid))
             else:
-                safe_send_msg(cid, "❌请输入1-50之间的数字")
+                safe_send_msg(cid, "❌请输入1-100之间的数字")
         bot.register_next_step_handler(call.message, set_group_size)
 
     elif data == "start_split":
         user_state[uid] = "awaiting_images"
-        safe_send_msg(cid, "🖼️请发送图片或图片ZIP压缩包\n支持格式：JPG、PNG、BMP、GIF、WEBP\n单张图片不超过10MB")
+        safe_send_msg(cid, "🖼️请发送图片或图片ZIP压缩包\n支持格式：JPG、PNG、BMP、GIF、WEBP\n单张图片不超过10MB，ZIP不超过18MB\n\n💡 大文件请点击菜单中的“🌐大文件上传”获取网页链接")
+
+    elif data == "web_upload":
+        # 生成专属 token
+        token = secrets.token_urlsafe(16)
+        user_web_tokens[token] = {
+            "uid": uid,
+            "expire": time.time() + WEB_TOKEN_EXPIRE
+        }
+        # 清理过期 token
+        for t, info in list(user_web_tokens.items()):
+            if info['expire'] < time.time():
+                del user_web_tokens[t]
+        # 获取域名（从环境变量或请求中，这里用 Railway 自动分配的域名）
+        # 注意：需要在环境变量中设置 PUBLIC_URL，或者从 request.host 获取（但机器人无法直接获取）
+        # 简单方式：让用户自己拼接，或我们在环境变量中配置
+        public_url = os.getenv("PUBLIC_URL", "https://your-app.up.railway.app")
+        url = f"{public_url}/upload?token={token}"
+        safe_send_msg(cid, f"🌐 您的专属网页上传链接（{WEB_TOKEN_EXPIRE//60}分钟内有效）：\n{url}\n\n上传完成后结果会自动发送给您")
 
     elif data == "user":
         bot.edit_message_text("👤个人中心", cid, call.message.message_id, reply_markup=user_menu(uid))
@@ -348,11 +431,11 @@ def callback_handler(call):
             safe_send_msg(cid, "📊暂无用户数据")
             return
         text = "📊用户余额总表\n用户ID | 余额\n"
-        for uid_key, info in all_user_list[:50]:  # 限制显示前50个
+        for uid_key, info in all_user_list[:50]:
             text += f"{uid_key} | {info['balance']:.4f}\n"
         safe_send_msg(cid, text[:4000])
 
-# ===================== 文件接收处理 =====================
+# ===================== 机器人文件接收（Telegram小文件处理）=====================
 @bot.message_handler(content_types=['document', 'photo'])
 def handle_images(msg):
     uid = msg.from_user.id
@@ -367,7 +450,6 @@ def handle_images(msg):
         images_names = []
 
         if msg.content_type == 'photo':
-            # 单张图片
             file_info = bot.get_file(msg.photo[-1].file_id)
             img_data = bot.download_file(file_info.file_path)
             if len(img_data) <= MAX_IMAGE_SIZE:
@@ -376,36 +458,81 @@ def handle_images(msg):
         elif msg.content_type == 'document':
             file_name = msg.document.file_name.lower()
             file_info = bot.get_file(msg.document.file_id)
+            if file_info.file_size and file_info.file_size > 18 * 1024 * 1024:
+                safe_send_msg(cid, "❌文件超过18MB，请使用网页上传（点击菜单“🌐大文件上传”）")
+                return
             data = bot.download_file(file_info.file_path)
-
             if file_name.endswith('.zip'):
-                # ZIP压缩包
-                images_data, images_names = process_zip_images(data)
+                # 临时保存ZIP然后调用处理
+                tmp_zip = os.path.join(UPLOAD_FOLDER, f"tg_{uid}_{int(time.time())}.zip")
+                with open(tmp_zip, 'wb') as f:
+                    f.write(data)
+                # 处理并发送
+                output_zips = process_zip_file(tmp_zip, get_user(uid)['mode'], get_user(uid)['images_per_group'])
+                os.remove(tmp_zip)
+                if output_zips:
+                    # 扣费逻辑
+                    total_images = 0
+                    for zpath in output_zips:
+                        with zipfile.ZipFile(zpath, 'r') as zf:
+                            total_images += len([name for name in zf.namelist() if name.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.webp'))])
+                    fee = total_images * PRICE_SPLIT
+                    u = get_user(uid)
+                    if not is_vip_valid(uid):
+                        if u['balance'] < fee:
+                            for p in output_zips:
+                                os.remove(p)
+                            safe_send_msg(cid, f"❌余额不足，需要 {fee:.4f} 元")
+                            return
+                        u['balance'] -= fee
+                        add_log(uid, f"Telegram图片分包ZIP", total_images, fee)
+                    for p in output_zips:
+                        safe_send_document(cid, p)
+                        os.remove(p)
+                    safe_send_msg(cid, f"✅分包完成，共 {len(output_zips)} 个ZIP文件")
+                else:
+                    safe_send_msg(cid, "❌ZIP内未找到有效图片")
+                user_state[uid] = "idle"
+                return
             elif file_name.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')):
-                # 单张图片
                 if len(data) <= MAX_IMAGE_SIZE:
                     images_data.append(data)
                     images_names.append(msg.document.file_name)
             else:
-                safe_send_msg(cid, "❌不支持的文件格式，请发送图片或图片ZIP")
+                safe_send_msg(cid, "❌不支持的文件格式")
                 return
 
         if not images_data:
             safe_send_msg(cid, "❌未找到有效图片")
             return
 
-        total_images = len(images_data)
-        if total_images > 500:
-            safe_send_msg(cid, "❌图片数量过多（最多500张），请分批处理")
+        total = len(images_data)
+        if total > 100:
+            safe_send_msg(cid, "❌图片过多，建议打包ZIP上传或使用网页上传")
             return
 
-        safe_send_msg(cid, f"✅已接收{total_images}张图片，开始处理...")
-        # 直接开始分包
-        split_images(uid, cid, images_data, images_names)
+        # 单张图片或少量图片：直接打包成ZIP发送
+        groups = [images_data[i:i+get_user(uid)['images_per_group']] for i in range(0, total, get_user(uid)['images_per_group'])]
+        u = get_user(uid)
+        fee = total * PRICE_SPLIT
+        if not is_vip_valid(uid) and u['balance'] < fee:
+            safe_send_msg(cid, f"❌余额不足，需要 {fee:.4f} 元")
+            return
+        for idx, group in enumerate(groups, 1):
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for j, img in enumerate(group):
+                    zf.writestr(f"image_{j+1}.jpg", img)
+            safe_send_document(cid, zip_buffer.getvalue(), f"分包_{idx}.zip")
+        if not is_vip_valid(uid):
+            u['balance'] -= fee
+            add_log(uid, "Telegram单图分包", total, fee)
+        safe_send_msg(cid, f"✅分包完成，共 {len(groups)} 个ZIP文件")
         user_state[uid] = "idle"
 
     except Exception as e:
-        safe_send_msg(cid, "❌图片解析失败，请重试")
+        print(f"Telegram文件处理异常: {e}")
+        safe_send_msg(cid, "❌处理失败，请重试")
         user_state[uid] = "idle"
 
 # ===================== 卡密和管理员功能 =====================
@@ -512,8 +639,6 @@ def text_msg(msg):
     txt = msg.text.strip()
 
     if txt == "取消":
-        if uid in user_images:
-            del user_images[uid]
         if uid in user_state:
             user_state[uid] = "idle"
         safe_send_msg(cid, "✅已取消当前操作")
@@ -522,16 +647,28 @@ def text_msg(msg):
         get_user(uid)
         user_state[uid] = "idle"
         now = get_beijing_time_str()
-        welcome_text = (
-            "🤖 图片分包机器人 | 正常运行中✅\n"
-            f"⏰ 北京时间：{now}\n\n"
-            "功能说明：\n"
-            "🖼️ 图片分包：将多张图片按组发送\n"
-            "🗜️ 图片压缩：自动压缩大图片\n"
-            "📦 ZIP支持：可直接上传图片ZIP包"
+        welcome = (
+            "🤖 图片分包机器人\n"
+            f"⏰ {now}\n\n"
+            "📌 小文件：直接发送图片或ZIP（不超过18MB）\n"
+            "📌 大文件：点击菜单中的“🌐大文件上传”获取专属网页链接\n"
+            "✅ 支持多用户，每人均有独立链接和扣费"
         )
-        bot.send_message(cid, welcome_text, reply_markup=menu(uid))
+        bot.send_message(cid, welcome, reply_markup=menu(uid))
+
+# ===================== 启动两个线程 =====================
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT, debug=False)
+
+def run_telegram():
+    print("🤖 机器人启动成功")
+    bot.infinity_polling()
 
 if __name__ == "__main__":
-    print("🤖 图片分包机器人启动成功")
-    bot.infinity_polling()
+    # 启动Flask线程
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # 启动Telegram轮询（主线程）
+    run_telegram()
