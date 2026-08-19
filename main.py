@@ -19,28 +19,28 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 
 # ===================== 业务配置 =====================
-PRICE_SPLIT = 0.0005          # 每张图片分包费用
-PRICE_COMPRESS = 0.0003       # 每张图片压缩费用（可选）
+PRICE_SPLIT = 0.0005
+PRICE_COMPRESS = 0.0003
 TG_API_DELAY = 1.2
-MAX_IMAGE_SIZE = 10 * 1024 * 1024   # 单张图片最大10MB
-MAX_ZIP_SIZE = 500 * 1024 * 1024    # 网页上传最大500MB
-MAX_IMAGES_IN_ZIP = 1000            # ZIP内图片数量上限
+MAX_IMAGE_SIZE = 10 * 1024 * 1024          # 单张图片最大10MB
+MAX_ZIP_SIZE = 1.5 * 1024 * 1024 * 1024    # 上传ZIP最大1.5GB
+MAX_IMAGES_IN_ZIP = 1000                   # ZIP内图片数量上限
 COMPRESS_QUALITY = 85
 UPLOAD_FOLDER = "/tmp/uploads"
 OUTPUT_FOLDER = "/tmp/outputs"
-WEB_TOKEN_EXPIRE = 1800             # 上传链接有效期（秒），30分钟
+WEB_TOKEN_EXPIRE = 1800                    # 链接有效期30分钟
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # ===================== 全局数据 =====================
-users = {}               # 用户数据
-cards = {}               # 余额卡密
-time_cards = {}          # 时长卡密
-user_state = {}          # 用户操作状态
-log_user = {}            # 消费日志
-log_recharge = {}        # 充值日志
-user_web_tokens = {}     # token -> {"uid": uid, "expire": timestamp}
+users = {}
+cards = {}
+time_cards = {}
+user_state = {}
+log_user = {}
+log_recharge = {}
+user_web_tokens = {}
 
 # ===================== 工具函数 =====================
 def get_user(uid):
@@ -94,7 +94,6 @@ def safe_send_msg(chat_id, text, retry=3):
     return False
 
 def safe_send_document(chat_id, file_path, retry=3):
-    """从磁盘路径发送文档，带重试"""
     for i in range(retry):
         try:
             time.sleep(TG_API_DELAY)
@@ -111,7 +110,6 @@ def safe_send_document(chat_id, file_path, retry=3):
     return False
 
 def compress_image(image_bytes, quality=COMPRESS_QUALITY, max_size=MAX_IMAGE_SIZE):
-    """压缩图片，返回字节"""
     try:
         img = Image.open(BytesIO(image_bytes))
         if img.mode in ('RGBA', 'LA', 'P'):
@@ -132,6 +130,18 @@ def compress_image(image_bytes, quality=COMPRESS_QUALITY, max_size=MAX_IMAGE_SIZ
         return output.getvalue()
     except:
         return None
+
+def cleanup_old_files(folder, hours=1):
+    """删除指定文件夹中超过指定小时数的文件"""
+    now = time.time()
+    try:
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            if os.path.isfile(file_path):
+                if now - os.path.getmtime(file_path) > hours * 3600:
+                    os.remove(file_path)
+    except Exception:
+        pass
 
 # ===================== 机器人初始化 =====================
 if not BOT_TOKEN or ADMIN_ID == 0:
@@ -173,14 +183,9 @@ def admin_kb():
     kb.add(telebot.types.InlineKeyboardButton("🔙返回", callback_data="back"))
     return kb
 
-# ===================== 核心处理函数（从文件路径读取）=====================
+# ===================== 核心处理函数 =====================
 def process_zip_file(zip_path, mode='original', group_size=10):
-    """
-    处理ZIP文件，按组打包成新的ZIP，返回输出ZIP文件路径列表。
-    mode: 'original' 或 'compressed'
-    group_size: 每组图片数量
-    """
-    # 解压ZIP到临时目录
+    """处理ZIP文件，按组打包成新的ZIP，返回输出ZIP文件路径列表"""
     extract_dir = os.path.join(UPLOAD_FOLDER, f"extract_{int(time.time())}_{uuid.uuid4().hex[:6]}")
     os.makedirs(extract_dir, exist_ok=True)
     image_files = []
@@ -188,7 +193,6 @@ def process_zip_file(zip_path, mode='original', group_size=10):
         with zipfile.ZipFile(zip_path, 'r') as zf:
             for file_name in zf.namelist():
                 if file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')):
-                    # 解压单个文件
                     target_path = os.path.join(extract_dir, os.path.basename(file_name))
                     with zf.open(file_name) as source, open(target_path, 'wb') as target:
                         shutil.copyfileobj(source, target)
@@ -203,9 +207,9 @@ def process_zip_file(zip_path, mode='original', group_size=10):
         return []
 
     if not image_files:
+        shutil.rmtree(extract_dir, ignore_errors=True)
         return []
 
-    # 按组分组
     groups = [image_files[i:i+group_size] for i in range(0, len(image_files), group_size)]
     output_zips = []
     for idx, group in enumerate(groups, 1):
@@ -226,9 +230,86 @@ def process_zip_file(zip_path, mode='original', group_size=10):
                     zf_out.write(img_path, os.path.basename(img_path))
         output_zips.append(out_zip_path)
 
-    # 清理解压目录
+    # 处理完成后立即清理解压目录
     shutil.rmtree(extract_dir, ignore_errors=True)
     return output_zips
+
+def process_and_notify(upload_path, uid, mode, group_size, token):
+    """后台处理上传的ZIP，并通知用户，处理完删除所有临时文件"""
+    try:
+        output_zips = process_zip_file(upload_path, mode, group_size)
+        # 删除上传的原始ZIP
+        try:
+            os.remove(upload_path)
+        except:
+            pass
+
+        if not output_zips:
+            safe_send_msg(uid, "❌处理失败，请检查文件格式或内容")
+            return
+
+        total_images = 0
+        for zpath in output_zips:
+            with zipfile.ZipFile(zpath, 'r') as zf:
+                total_images += len([name for name in zf.namelist() if name.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.webp'))])
+
+        fee = total_images * PRICE_SPLIT
+        u = get_user(uid)
+
+        if not is_vip_valid(uid):
+            if u['balance'] < fee:
+                for zpath in output_zips:
+                    try:
+                        os.remove(zpath)
+                    except:
+                        pass
+                safe_send_msg(uid, f"❌余额不足，需要 {fee:.4f} 元，当前余额 {u['balance']:.4f} 元")
+                return
+            u['balance'] -= fee
+            add_log(uid, f"网页图片分包ZIP｜每组{group_size}张", total_images, fee)
+        else:
+            fee = 0.0
+
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", os.getenv("PUBLIC_URL", ""))
+        if not domain:
+            for zpath in output_zips:
+                try:
+                    os.remove(zpath)
+                except:
+                    pass
+            safe_send_msg(uid, "❌无法获取域名，下载链接生成失败")
+            return
+
+        links = [f"https://{domain}/download/{os.path.basename(p)}" for p in output_zips]
+
+        bot_msg = f"✅ 网页上传处理完成\n图片总数：{total_images}张\n分组：{len(output_zips)}个ZIP文件\n"
+        if fee > 0:
+            bot_msg += f"扣费：{fee:.4f}元\n剩余余额：{u['balance']:.4f}元\n"
+        else:
+            bot_msg += "VIP免费处理\n"
+        bot_msg += "下载链接：\n" + "\n".join(links)
+        safe_send_msg(uid, bot_msg)
+
+        if token in user_web_tokens:
+            del user_web_tokens[token]
+
+        # 安排删除输出ZIP文件（1小时后）
+        def delayed_delete():
+            time.sleep(3600)
+            for zpath in output_zips:
+                try:
+                    os.remove(zpath)
+                except:
+                    pass
+        threading.Thread(target=delayed_delete, daemon=True).start()
+
+    except Exception as e:
+        print(f"后台处理异常: {e}")
+        safe_send_msg(uid, "❌处理出错，请稍后重试")
+        try:
+            os.remove(upload_path)
+        except:
+            pass
 
 # ===================== Flask Web应用 =====================
 app = Flask(__name__)
@@ -258,67 +339,26 @@ def upload():
         if file.filename == '':
             return render_template('upload.html', error='文件名为空', token=token)
 
-        # 检查用户余额（非VIP）
         if not is_vip_valid(uid) and u['balance'] <= 0:
             return render_template('upload.html', error='余额不足，请先充值', token=token)
 
-        # 保存上传的文件
         upload_path = os.path.join(UPLOAD_FOLDER, f"upload_{uid}_{int(time.time())}_{uuid.uuid4().hex[:6]}.zip")
         file.save(upload_path)
 
-        # 获取处理参数
         mode = request.form.get('mode', 'original')
         group_size = int(request.form.get('group_size', 10))
         if group_size < 1 or group_size > 100:
             group_size = 10
 
-        # 处理文件
-        output_zips = process_zip_file(upload_path, mode, group_size)
-        os.remove(upload_path)
+        # 立即返回，后台处理
+        threading.Thread(target=process_and_notify, args=(upload_path, uid, mode, group_size, token)).start()
 
-        if not output_zips:
-            return render_template('upload.html', error='处理失败，请检查文件格式或内容', token=token)
-
-        # 统计图片总数
-        total_images = 0
-        for zpath in output_zips:
-            with zipfile.ZipFile(zpath, 'r') as zf:
-                total_images += len([name for name in zf.namelist() if name.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.webp'))])
-
-        fee = total_images * PRICE_SPLIT
-
-        # 检查余额并扣费
-        if not is_vip_valid(uid):
-            if u['balance'] < fee:
-                for zpath in output_zips:
-                    os.remove(zpath)
-                return render_template('upload.html', error=f'余额不足，需要 {fee:.4f} 元，当前余额 {u["balance"]:.4f} 元，请先充值', token=token)
-            u['balance'] -= fee
-            add_log(uid, f"网页图片分包ZIP｜每组{group_size}张", total_images, fee)
-        else:
-            fee = 0.0
-
-        # 获取域名用于下载链接
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", os.getenv("PUBLIC_URL", request.host))
-        links = [f"https://{domain}/download/{os.path.basename(p)}" for p in output_zips]
-        result_html = '<br>'.join([f'<a href="{link}">{os.path.basename(p)}</a>' for link, p in zip(links, output_zips)])
-
-        # 通过 Telegram 通知用户
-        bot_msg = f"✅ 网页上传处理完成\n图片总数：{total_images}张\n分组：{len(output_zips)}个ZIP文件\n"
-        if fee > 0:
-            bot_msg += f"扣费：{fee:.4f}元\n剩余余额：{u['balance']:.4f}元\n"
-        else:
-            bot_msg += "VIP免费处理\n"
-        bot_msg += "下载链接：\n" + "\n".join(links)
-        safe_send_msg(uid, bot_msg)
-
-        return render_template('upload.html', message=f'处理成功，共 {len(output_zips)} 个ZIP文件，下载链接已发送到您的 Telegram，也可以点击下载：<br>{result_html}', token=token)
+        return render_template('upload.html', message='文件已上传，正在后台处理，完成后会通过 Telegram 通知您，请稍候...', token=token)
 
     return render_template('upload.html', token=token)
 
 @app.route('/download/<filename>')
 def download(filename):
-    # 防止路径遍历
     if '..' in filename or filename.startswith('/'):
         abort(404)
     file_path = os.path.join(OUTPUT_FOLDER, filename)
@@ -354,10 +394,8 @@ def callback_handler(call):
         safe_send_msg(cid, "🖼️请发送图片或图片ZIP压缩包\n支持格式：JPG、PNG、BMP、GIF、WEBP\n单张图片不超过10MB，ZIP不超过18MB\n\n💡 大文件请点击菜单中的“🌐大文件上传”获取网页链接")
 
     elif data == "web_upload":
-        # 生成专属 token
         token = secrets.token_urlsafe(16)
         user_web_tokens[token] = {"uid": uid, "expire": time.time() + WEB_TOKEN_EXPIRE}
-        # 清理过期 token
         for t, info in list(user_web_tokens.items()):
             if info['expire'] < time.time():
                 del user_web_tokens[t]
@@ -451,14 +489,12 @@ def handle_images(msg):
                 return
             data = bot.download_file(file_info.file_path)
             if file_name.endswith('.zip'):
-                # 临时保存ZIP然后调用处理
                 tmp_zip = os.path.join(UPLOAD_FOLDER, f"tg_{uid}_{int(time.time())}.zip")
                 with open(tmp_zip, 'wb') as f:
                     f.write(data)
                 output_zips = process_zip_file(tmp_zip, get_user(uid)['mode'], get_user(uid)['images_per_group'])
                 os.remove(tmp_zip)
                 if output_zips:
-                    # 统计图片总数
                     total_images = 0
                     for zpath in output_zips:
                         with zipfile.ZipFile(zpath, 'r') as zf:
@@ -657,5 +693,15 @@ if __name__ == "__main__":
     telegram_thread.daemon = True
     telegram_thread.start()
 
-    # 主线程运行 Flask，监听端口
+    # 启动定期清理线程（可选）
+    def cleanup_loop():
+        while True:
+            cleanup_old_files(UPLOAD_FOLDER, 1)
+            cleanup_old_files(OUTPUT_FOLDER, 1)
+            time.sleep(1800)  # 每30分钟清理一次
+    cleanup_thread = threading.Thread(target=cleanup_loop)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+
+    # 主线程运行 Flask
     run_flask()
