@@ -1,259 +1,235 @@
-import re
-import sqlite3
-import logging
 import os
-from datetime import datetime, timedelta, timezone
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+import time
+import zipfile
+from io import BytesIO
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaDocument
+from telebot.apihelper import ApiException
+from flask import Flask, request
 
-# ================= 从环境变量读取配置（无硬编码密钥） =================
+# ================= Railway环境变量 =================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-MY_ID_STR = os.getenv("MY_ID", "0")
-try:
-    MY_ID = int(MY_ID_STR)
-except ValueError:
-    MY_ID = 0
-# ===================================================================
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# 校验关键变量
-if not BOT_TOKEN or MY_ID == 0:
-    print("错误：请在环境变量配置 BOT_TOKEN 和 MY_ID")
-    exit()
+# 业务配置
+PER_BATCH_IMG = 20        # 默认每个zip包图片张数
+TG_API_DELAY = 1.2
+TG_GROUP_DELAY = 2.5
+IMG_SUFFIX = {".jpg", ".jpeg", ".png", ".webp"}
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# 全局状态（和txt机器人结构对齐）
+user_state = dict()       # 用户状态 idle / img_split
+user_config = dict()      # {uid:{"per_batch":20}}
 
-# --- 时间工具 ---
-def get_beijing_time():
-    tz = timezone(timedelta(hours=8))
-    return datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+app = Flask(__name__)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- 只识别最后两行的网址 ---
-def extract_link_smartly(text):
-    if not text: return None
-    
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if not lines: return None
-    
-    last_two_lines = lines[-2:] if len(lines) >= 2 else lines
-    last_two_text = "\n".join(last_two_lines)
-    
-    url_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,4})", last_two_text)
-    if url_match: 
-        return url_match.group(1).lower()
-        
-    return None
+# ================= 工具函数 =================
+def get_user_cfg(uid):
+    if uid not in user_config:
+        user_config[uid] = {"per_batch": PER_BATCH_IMG}
+    return user_config[uid]
 
-def auto_extract_filenames(text):
-    start_match = re.search(r"(包号|编号|单反)[：:](.*?)(?=手机|尾号|数量|话术|送达|用浏览器|$)", text, re.DOTALL)
-    if not start_match: 
-        return None if len(text.strip()) < 10 else text.split('\n')[0][:50].strip()
-    raw_content = start_match.group(2).strip()
-    found_items = []
-    for line in raw_content.split('\n'):
-        line = line.strip()
-        if re.search(r"\d", line) and (("-" in line) or ("." in line) or ("A" in line.upper())):
-            clean_line = re.sub(r"^[^\da-zA-Z\u4e00-\u9fa5]*?[\u4e00-\u9fa5]{2,3}\s+", "", line)
-            found_items.append(clean_line.strip())
-    return ", ".join(found_items) if found_items else None
+def is_admin(uid):
+    return uid == ADMIN_ID
 
-# --- 排序辅助函数 ---
-def sort_by_package_number(row):
-    file_name = row[0]
-    if not file_name:
-        return (1, "")
-    num_match = re.search(r"(\d+)\s*$", file_name)
-    if num_match:
-        return (0, int(num_match.group(1)))
-    return (1, file_name)
+def safe_send_msg(chat_id, text, retry=3):
+    for i in range(retry):
+        try:
+            time.sleep(TG_API_DELAY)
+            bot.send_message(chat_id, text)
+            return True
+        except ApiException as e:
+            if "429" in str(e):
+                time.sleep(3)
+                continue
+            return False
+        except Exception:
+            continue
+    return False
 
-# --- 数据库操作 ---
-def init_db():
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS admin_confirmed (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, link TEXT, file_name TEXT, final_val INTEGER,
-        admin_name TEXT, bj_time TEXT, chat_id INTEGER, worker_id INTEGER, worker_name TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS admins (user_id INTEGER, chat_id INTEGER, name TEXT, PRIMARY KEY (user_id, chat_id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS authorized_chats (chat_id INTEGER PRIMARY KEY)''')
-    conn.commit()
-    conn.close()
+def safe_send_media_group(chat_id, media_list, retry=3):
+    for i in range(retry):
+        try:
+            time.sleep(TG_GROUP_DELAY)
+            bot.send_media_group(chat_id, media_list)
+            return True
+        except ApiException as e:
+            if "429" in str(e):
+                time.sleep(4)
+                continue
+            return False
+        except Exception:
+            continue
+    return False
 
-def is_admin(user_id, chat_id):
-    if user_id == MY_ID: return True
-    conn = sqlite3.connect('stats.db')
-    res = conn.execute('SELECT 1 FROM admins WHERE user_id = ? AND chat_id = ?', (user_id, chat_id)).fetchone()
-    conn.close()
-    return True if res else False
+def main_menu(uid):
+    kb = InlineKeyboardMarkup(row_width=2)
+    cfg = get_user_cfg(uid)
+    kb.add(InlineKeyboardButton(f"🖼每包图片：{cfg['per_batch']}张", callback_data="set_batch"))
+    kb.add(InlineKeyboardButton("ℹ帮助", callback_data="help"))
+    if is_admin(uid):
+        kb.add(InlineKeyboardButton("🔧管理员", callback_data="admin_panel"))
+    return kb
 
-def is_chat_authorized(chat_id):
-    conn = sqlite3.connect('stats.db')
-    res = conn.execute('SELECT 1 FROM authorized_chats WHERE chat_id = ?', (chat_id,)).fetchone()
-    conn.close()
-    return True if res else False
+def extract_images_from_zip_bytes(zip_bytes):
+    """内存解压zip，提取全部图片二进制+文件名，不落地磁盘"""
+    img_items = []
+    with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zf:
+        for fname in zf.namelist():
+            if fname.endswith("/"):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in IMG_SUFFIX:
+                raw_data = zf.read(fname)
+                img_items.append((os.path.basename(fname), raw_data))
+    return img_items
 
-# --- 核心录入逻辑 ---
-async def handle_direct_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    admin_user = update.effective_user
-    if not is_chat_authorized(chat_id) or not is_admin(admin_user.id, chat_id): return
-    
-    msg_text = update.message.text.strip()
-    val_match = re.search(r"^([+-])(\d+)", msg_text)
-    if not val_match: return
-    
-    change_val = int(val_match.group(2)) if val_match.group(1) == '+' else -int(val_match.group(2))
-    reply_msg = update.message.reply_to_message
+def build_zip_in_memory(image_list, per_batch):
+    """
+    image_list: [(filename, bytes),...]
+    per_batch:每包多少张图片
+    return list[BytesIO] 每个元素是一个zip内存对象
+    """
+    output_zips = []
+    total = len(image_list)
+    for start in range(0, total, per_batch):
+        slice_imgs = image_list[start: start + per_batch]
+        mem_zip = BytesIO()
+        with zipfile.ZipFile(mem_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, data in slice_imgs:
+                zf.writestr(name, data)
+        mem_zip.seek(0)
+        output_zips.append(mem_zip)
+    return output_zips
 
-    link_in_msg = extract_link_smartly(msg_text)
-    file_in_msg = auto_extract_filenames(msg_text)
-    if not reply_msg and not link_in_msg and not file_in_msg: return 
+# ================= Webhook入口（Railway必须） =================
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    update = telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "ok"
 
-    if reply_msg:
-        target_worker = reply_msg.from_user
-        source_text = reply_msg.text or reply_msg.caption or msg_text
+@app.route("/")
+def index():
+    return "✅图片分包Bot运行｜Webhook模式"
+
+def set_webhook():
+    import requests
+    domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    hook_url = f"https://{domain}/webhook/{BOT_TOKEN}"
+    bot.remove_webhook()
+    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={hook_url}&drop_pending_updates=true")
+
+# ================= 回调按钮 =================
+@bot.callback_query_handler(func=lambda call: True)
+def callback(call):
+    uid = call.from_user.id
+    cid = call.message.chat.id
+    data = call.data
+    bot.answer_callback_query(call.id)
+
+    if data == "set_batch":
+        bot.send_message(cid, "📏请输入每个分包zip存放多少张图片（纯数字）：")
+        def input_batch(m):
+            if m.text.isdigit():
+                num = int(m.text)
+                if 1 <= num <= 200:
+                    get_user_cfg(uid)["per_batch"] = num
+                    safe_send_msg(cid, f"✅已设置每包 {num} 张图片", reply_markup=main_menu(uid))
+                else:
+                    safe_send_msg(cid, "❌范围1‑200", reply_markup=main_menu(uid))
+            else:
+                safe_send_msg(cid, "❌请输入纯数字", reply_markup=main_menu(uid))
+        bot.register_next_step_handler(call.message, input_batch)
+
+    elif data == "help":
+        text = """🖼图片分包机器人使用说明
+1.上传一个zip压缩包，包内放jpg/png/webp图片
+2.机器人自动提取全部图片
+3.按设定张数打包成多个batch_1.zip、batch_2.zip返回
+⚠限制
+• bot下载文件最大20MB
+• 输出单个zip不能超过50MB(TG限制)
+• 只支持zip，不支持rar/7z
+发送 /start 返回主页"""
+        safe_send_msg(cid, text)
+
+    elif data == "admin_panel":
+        if not is_admin(uid):
+            safe_send_msg(cid, "❌管理员权限不足")
+
+# ================= 接收上传的zip文档 =================
+@bot.message_handler(content_types=["document"])
+def handle_document(msg):
+    uid = msg.from_user.id
+    cid = msg.chat.id
+    doc = msg.document
+    fname = doc.file_name.lower()
+    if not fname.endswith(".zip"):
+        safe_send_msg(cid, "❗请上传 .zip 压缩包，内部存放图片")
+        return
+
+    safe_send_msg(cid, "📥正在下载并解析压缩包，请稍候…")
+    try:
+        file_info = bot.get_file(doc.file_id)
+        zip_binary = bot.download_file(file_info.file_path)
+    except Exception:
+        safe_send_msg(cid, "❌下载失败，文件可能超过20MB限制")
+        return
+
+    img_list = extract_images_from_zip_bytes(zip_binary)
+    if len(img_list) == 0:
+        safe_send_msg(cid, "❌zip压缩包没有识别到jpg/png/webp图片")
+        return
+
+    cfg = get_user_cfg(uid)
+    per = cfg["per_batch"]
+    safe_send_msg(cid, f"✅识别图片总数：{len(img_list)}张｜每包{per}张，正在生成分包…")
+
+    zip_mem_list = build_zip_in_memory(img_list, per)
+    media_group = []
+    batch_index = 1
+    send_all_ok = True
+
+    for idx, memzip in enumerate(zip_mem_list, 1):
+        memzip.name = f"batch_{idx}.zip"
+        media_group.append(InputMediaDocument(memzip))
+        if len(media_group) >=10:
+            safe_send_msg(cid, f"📤发送分包，第{batch_index}批")
+            ok = safe_send_media_group(cid, media_group)
+            if not ok:
+                send_all_ok = False
+                break
+            media_group.clear()
+            batch_index += 1
+    if send_all_ok and len(media_group)>0:
+        safe_send_msg(cid, f"📤发送分包，第{batch_index}批")
+        safe_send_media_group(cid, media_group)
+
+    if send_all_ok:
+        safe_send_msg(cid, f"🎉全部完成！共生成 {len(zip_mem_list)} 个分包zip。")
     else:
-        target_worker = admin_user
-        source_text = msg_text
+        safe_send_msg(cid, "❌部分文件发送失败，请调小每包图片数量重试。")
 
-    final_link = extract_link_smartly(source_text) or "手动录入"
-    final_f_name = auto_extract_filenames(source_text) or "手动录入"
-    now = get_beijing_time()
+# ================= 文本指令 /start、取消 =================
+@bot.message_handler(func=lambda m: True)
+def text_handler(msg):
+    uid = msg.from_user.id
+    cid = msg.chat.id
+    text = msg.text.strip()
 
-    conn = sqlite3.connect('stats.db')
-    conn.execute('''INSERT INTO admin_confirmed (link, file_name, final_val, admin_name, bj_time, chat_id, worker_id, worker_name) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (final_link, final_f_name, change_val, admin_user.full_name, now, chat_id, target_worker.id, target_worker.full_name))
-    res = conn.execute('SELECT SUM(final_val) FROM admin_confirmed WHERE chat_id = ? AND worker_id = ?', (chat_id, target_worker.id)).fetchone()
-    conn.commit()
-    conn.close()
-    
-    bal = res[0] if res[0] else 0
+    if text == "/start":
+        user_state[uid] = "idle"
+        welcome = "🤖图片分包机器人✅\n上传包含图片的zip压缩包即可开始处理"
+        bot.send_message(cid, welcome, reply_markup=main_menu(uid))
+    elif text == "取消":
+        user_state[uid] = "idle"
+        safe_send_msg(cid, "✅操作已取消")
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"🎯 **操作成功**\n━━━━━━━━━━━━━━\n"
-             f"👤 **对象:** [{target_worker.full_name}](tg://user?id={target_worker.id})\n"
-             f"🌐 **网址:** `{final_link}`\n"
-             f"📦 **包号:** `{final_f_name}`\n"
-             f"🔢 **变动:** `{val_match.group(0)}`\n"
-             f"💰 **余额:** `{bal}`\n"
-             f"━━━━━━━━━━━━━━\n⏰ {now}",
-        parse_mode='Markdown'
-    )
-
-# --- 报表统计 ---
-async def query_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
-    conn = sqlite3.connect('stats.db')
-    links = conn.execute('SELECT link, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY link', (chat_id,)).fetchall()
-    workers = conn.execute('SELECT worker_name, worker_id, SUM(final_val) FROM admin_confirmed WHERE chat_id = ? GROUP BY worker_id ORDER BY SUM(final_val) DESC', (chat_id,)).fetchall()
-    conn.close()
-    
-    if not links:
-        return await context.bot.send_message(chat_id=chat_id, text="📭 暂无统计数据")
-        
-    total_sum = sum(r[1] for r in links)
-    report = f"📋 **本群总报表**\n\n🌐 **链接统计：**\n"
-    for r in links: report += f"• `{r[0]}`: **{r[1]}**\n"
-    report += f"━━━━━━━━━━━━━━\n🌟 **全部总计：{total_sum}**\n━━━━━━━━━━━━━━\n\n🏆 **排名汇总：**\n"
-    for w in workers: report += f"• [{w[0]}](tg://user?id={w[1]}): **{w[2]}**\n"
-    
-    await context.bot.send_message(chat_id=chat_id, text=report, parse_mode='Markdown')
-
-# --- 单独链接明细统计 ---
-async def query_link_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_chat_authorized(chat_id) or not is_admin(update.effective_user.id, chat_id): return
-    parts = update.message.text.split()
-    if len(parts) < 2: return
-    target = parts[1].strip().lower()
-    
-    conn = sqlite3.connect('stats.db')
-    rows = conn.execute('SELECT file_name, final_val, worker_name, worker_id, bj_time FROM admin_confirmed WHERE chat_id = ? AND link LIKE ?', (chat_id, f"%{target}%")).fetchall()
-    conn.close()
-    
-    if not rows:
-        return await context.bot.send_message(chat_id=chat_id, text=f"📭 链接 `{target}` 暂无明细记录")
-
-    sorted_rows = sorted(rows, key=sort_by_package_number)
-
-    report = f"📊 **明细记录 (按包号编号排序): {target}**\n━━━━━━━━━━━━━━\n"
-    for r in sorted_rows:
-        mark = "➕" if r[1] > 0 else "➖"
-        report += f"{mark} `{r[0]}` | **{r[1]}**\n👤 [{r[2]}](tg://user?id={r[3]}) | ⏰ {r[4].split()[1]}\n\n"
-    
-    await context.bot.send_message(chat_id=chat_id, text=report[:4000], parse_mode='Markdown')
-
-# --- 资金查询与管理 ---
-async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_chat_authorized(chat_id): return
-    conn = sqlite3.connect('stats.db')
-    res = conn.execute('SELECT SUM(final_val) FROM admin_confirmed WHERE chat_id = ? AND worker_id = ?', (chat_id, update.effective_user.id)).fetchone()
-    conn.close()
-    bal = res[0] if res[0] else 0
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text=f"💰 [{update.effective_user.full_name}](tg://user?id={update.effective_user.id})\n实时余额: `{bal}`\n⏰ {get_beijing_time()}", 
-        parse_mode='Markdown'
-    )
-
-async def admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if update.effective_user.id != MY_ID or not update.message.reply_to_message: return
-    target = update.message.reply_to_message.from_user
-    cmd = update.message.text.strip()
-    
-    conn = sqlite3.connect('stats.db')
-    if "授权管理员" in cmd:
-        conn.execute('INSERT OR REPLACE INTO admins (user_id, chat_id, name) VALUES (?, ?, ?)', (target.id, chat_id, target.full_name))
-        text = f"👑 **已成功授权管理员:** [{target.full_name}](tg://user?id={target.id})"
+if __name__ == "__main__":
+    if not BOT_TOKEN or ADMIN_ID ==0:
+        print("⚠️请配置环境变量 BOT_TOKEN、ADMIN_ID")
     else:
-        conn.execute('DELETE FROM admins WHERE user_id = ? AND chat_id = ?', (target.id, chat_id))
-        text = f"❌ **已撤销管理员权限:** {target.full_name}"
-    conn.commit()
-    conn.close()
-    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-
-async def service_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if update.effective_user.id != MY_ID: return
-    cmd = update.message.text.strip()
-    
-    conn = sqlite3.connect('stats.db')
-    if "授权群聊" in cmd:
-        conn.execute('INSERT OR IGNORE INTO authorized_chats (chat_id) VALUES (?)', (chat_id,))
-        text = "✅ **本群服务已启动 (独立消息模式)**"
-    else:
-        conn.execute('DELETE FROM authorized_chats WHERE chat_id = ?', (chat_id,))
-        text = "🚫 **本群服务已停止**"
-    conn.commit()
-    conn.close()
-    await context.bot.send_message(chat_id=chat_id, text=text)
-
-async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_admin(update.effective_user.id, chat_id): return
-    conn = sqlite3.connect('stats.db')
-    conn.execute('DELETE FROM admin_confirmed WHERE chat_id = ?', (chat_id,))
-    conn.commit()
-    conn.close()
-    await context.bot.send_message(chat_id=chat_id, text="🗑 **本群数据已清空归零**")
-
-def main():
-    init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(MessageHandler(filters.Regex(r"^(授权群聊|停止本群服务)$"), service_management))
-    app.add_handler(MessageHandler(filters.Regex(r"^(授权管理员|取消管理员)$"), admin_management))
-    app.add_handler(MessageHandler(filters.Regex(r"^统计全部$"), query_all))
-    app.add_handler(MessageHandler(filters.Regex(r"^统计\s+"), query_link_detail))
-    app.add_handler(MessageHandler(filters.Regex(r"^清空全部$"), clear_all))
-    app.add_handler(MessageHandler(filters.Regex(r"^资金$"), check_balance))
-    app.add_handler(MessageHandler(filters.Regex(r"^[+-]\d+"), handle_direct_entry))
-    
-    print("🚀 机器人已启动 (精准定位最后两行网址)...")
-    app.run_polling()
-
-if __name__ == '__main__': 
-    main()
+        set_webhook()
+        print("🤖图片分包Bot已启动 Webhook模式(Railway)")
