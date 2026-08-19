@@ -17,7 +17,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # 业务价格配置
 PRICE_SPLIT = 0.0005      # 图片分包单价（每张）
-PRICE_COMPRESS = 0.0003   # 图片压缩单价（每张）
+PRICE_COMPRESS = 0.0003   # 图片压缩单价（每张）— 可自行调整
 BATCH_SIZE = 10           # 每批发送图片数
 PAGE_NUM = 20
 TG_API_DELAY = 1.2
@@ -129,18 +129,17 @@ def compress_image(image_bytes, quality=COMPRESS_QUALITY, max_size=MAX_IMAGE_SIZ
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # 压缩到指定大小以内
+
         output = BytesIO()
         img.save(output, format='JPEG', quality=quality, optimize=True)
-        
+
         # 如果还是太大，继续降低质量
         current_quality = quality
         while output.tell() > max_size and current_quality > 30:
             current_quality -= 10
             output = BytesIO()
             img.save(output, format='JPEG', quality=current_quality, optimize=True)
-        
+
         return output.getvalue()
     except Exception as e:
         return None
@@ -204,7 +203,7 @@ def split_images(uid, cid, images_data, images_names):
     u = get_user(uid)
     total_images = len(images_data)
     fee = total_images * PRICE_SPLIT
-    
+
     # 检查余额
     if not is_vip_valid(uid):
         if u['balance'] < fee:
@@ -213,41 +212,41 @@ def split_images(uid, cid, images_data, images_names):
         safe_send_msg(cid, f"✅余额校验通过，图片总数：{total_images}张，开始分包...")
     else:
         safe_send_msg(cid, f"✅VIP用户免余额校验，图片总数：{total_images}张，开始分包...")
-    
+
     # 处理图片（压缩或原图）
     processed_images = process_image_batch(images_data, u['mode'])
-    
+
     # 分组
     groups = [processed_images[i:i+u['images_per_group']] for i in range(0, len(processed_images), u['images_per_group'])]
     name_groups = [images_names[i:i+u['images_per_group']] for i in range(0, len(images_names), u['images_per_group'])]
-    
-    # 发送图片组1
-    send_success):
- = True
-    for idx, (img_group, name_group       ) in enumerate(zip(groups media, name_groups),  = []
+
+    # 发送图片组
+    send_success = True
+    for idx, (img_group, name_group) in enumerate(zip(groups, name_groups), 1):
+        media = []
         for img_data, img_name in zip(img_group, name_group):
             bio = BytesIO(img_data)
             bio.name = img_name if img_name else f"image_{idx}.jpg"
             media.append(InputMediaDocument(bio))
-        
+
         safe_send_msg(cid, f"📤正在发送第{idx}组｜图片 {len(img_group)}张")
         if not safe_send_media_group(cid, media):
             send_success = False
             break
-    
+
     # 扣费
     if send_success:
         if not is_vip_valid(uid):
             u['balance'] -= fee
             add_log(uid, f"图片分包｜每组{u['images_per_group']}张", total_images, fee)
-        
+
         if is_vip_valid(uid):
             safe_send_msg(cid, f"✅图片分包完成（VIP免费）｜共{len(groups)}组")
         else:
             safe_send_msg(cid, f"✅图片分包完成｜扣费{fee:.4f}元｜剩余{u['balance']:.4f}元｜共{len(groups)}组")
     else:
         safe_send_msg(cid, "❌发送失败，本次不扣费，请重试！")
-    
+
     # 清理
     if uid in user_images:
         del user_images[uid]
@@ -278,12 +277,12 @@ def callback_handler(call):
     cid = call.message.chat.id
     data = call.data
     bot.answer_callback_query(call.id)
-    
+
     if data == "mode":
         u = get_user(uid)
         u["mode"] = "compressed" if u["mode"] == "original" else "original"
         bot.edit_message_text("✅图片模式已切换", cid, call.message.message_id, reply_markup=menu(uid))
-    
+
     elif data == "group_size":
         bot.send_message(cid, "📦请输入每组图片数量（纯数字，建议5-20张）")
         def set_group_size(m):
@@ -293,56 +292,56 @@ def callback_handler(call):
             else:
                 safe_send_msg(cid, "❌请输入1-50之间的数字")
         bot.register_next_step_handler(call.message, set_group_size)
-    
+
     elif data == "start_split":
         user_state[uid] = "awaiting_images"
         safe_send_msg(cid, "🖼️请发送图片或图片ZIP压缩包\n支持格式：JPG、PNG、BMP、GIF、WEBP\n单张图片不超过10MB")
-    
+
     elif data == "user":
         bot.edit_message_text("👤个人中心", cid, call.message.message_id, reply_markup=user_menu(uid))
-    
+
     elif data == "bal":
         u = get_user(uid)
         vip_status = "✅生效中" if is_vip_valid(uid) else "❌已过期/未开通"
         expire_time = get_vip_expire_time_str(uid)
         remain_days = get_vip_days_remaining(uid)
         safe_send_msg(cid, f"💰当前余额：{u['balance']:.4f}\n⏰VIP状态：{vip_status}\n📅到期时间：{expire_time}\n剩余时长：{remain_days}天")
-    
+
     elif data == "back":
         bot.edit_message_text("🏠返回主页", cid, call.message.message_id, reply_markup=menu(uid))
-    
+
     elif data == "cdk_use":
         safe_send_msg(cid, "💳请发送卡密进行兑换")
         bot.register_next_step_handler(call.message, use_cdk)
-    
+
     elif data == "admin":
         if not is_admin(uid):
             safe_send_msg(cid, "❌无管理员权限")
             return
         bot.edit_message_text("🔧管理后台", cid, call.message.message_id, reply_markup=admin_kb())
-    
+
     elif data == "addbal":
         safe_send_msg(cid, "➕格式：用户ID 金额")
         bot.register_next_step_handler(call.message, add_single_balance)
-    
+
     elif data == "subbal":
         safe_send_msg(cid, "➖格式：用户ID 金额")
         bot.register_next_step_handler(call.message, sub_single_balance)
-    
+
     elif data == "card":
         safe_send_msg(cid, "🎟️格式：卡密 面额（例：ABC123 10）")
         bot.register_next_step_handler(call.message, create_balance_card)
-    
+
     elif data == "time_card":
         safe_send_msg(cid, "⏰格式：卡密 天数（例：XYZ789 7）")
         bot.register_next_step_handler(call.message, create_time_card)
-    
+
     elif data == "broad":
         if not is_admin(uid):
             return
         safe_send_msg(cid, "📢请输入要全站广播的内容：")
         bot.register_next_step_handler(call.message, do_broadcast)
-    
+
     elif data == "ulist":
         all_user_list = list(users.items())
         if not all_user_list:
@@ -358,15 +357,15 @@ def callback_handler(call):
 def handle_images(msg):
     uid = msg.from_user.id
     cid = msg.chat.id
-    
+
     if user_state.get(uid) != "awaiting_images":
         return
-    
+
     try:
         safe_send_msg(cid, "📥正在解析图片，请稍候...")
         images_data = []
         images_names = []
-        
+
         if msg.content_type == 'photo':
             # 单张图片
             file_info = bot.get_file(msg.photo[-1].file_id)
@@ -378,7 +377,7 @@ def handle_images(msg):
             file_name = msg.document.file_name.lower()
             file_info = bot.get_file(msg.document.file_id)
             data = bot.download_file(file_info.file_path)
-            
+
             if file_name.endswith('.zip'):
                 # ZIP压缩包
                 images_data, images_names = process_zip_images(data)
@@ -390,21 +389,21 @@ def handle_images(msg):
             else:
                 safe_send_msg(cid, "❌不支持的文件格式，请发送图片或图片ZIP")
                 return
-        
+
         if not images_data:
             safe_send_msg(cid, "❌未找到有效图片")
             return
-        
+
         total_images = len(images_data)
         if total_images > 500:
             safe_send_msg(cid, "❌图片数量过多（最多500张），请分批处理")
             return
-        
+
         safe_send_msg(cid, f"✅已接收{total_images}张图片，开始处理...")
         # 直接开始分包
         split_images(uid, cid, images_data, images_names)
         user_state[uid] = "idle"
-        
+
     except Exception as e:
         safe_send_msg(cid, "❌图片解析失败，请重试")
         user_state[uid] = "idle"
@@ -511,14 +510,14 @@ def text_msg(msg):
     uid = msg.from_user.id
     cid = msg.chat.id
     txt = msg.text.strip()
-    
+
     if txt == "取消":
         if uid in user_images:
             del user_images[uid]
         if uid in user_state:
             user_state[uid] = "idle"
         safe_send_msg(cid, "✅已取消当前操作")
-    
+
     elif txt == "/start":
         get_user(uid)
         user_state[uid] = "idle"
