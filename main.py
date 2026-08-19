@@ -30,7 +30,6 @@ UPLOAD_FOLDER = "/tmp/uploads"
 OUTPUT_FOLDER = "/tmp/outputs"
 WEB_TOKEN_EXPIRE = 1800             # 上传链接有效期（秒），30分钟
 
-# 确保目录存在
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -235,10 +234,13 @@ def process_zip_file(zip_path, mode='original', group_size=10):
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_ZIP_SIZE
 
+@app.route('/')
+def index():
+    return "Bot is running", 200
+
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
     token = request.args.get('token', '')
-    # 验证token
     token_info = user_web_tokens.get(token)
     if not token_info:
         abort(401, "无效的上传链接")
@@ -257,11 +259,8 @@ def upload():
             return render_template('upload.html', error='文件名为空', token=token)
 
         # 检查用户余额（非VIP）
-        if not is_vip_valid(uid):
-            # 先粗略检查：文件大小无法确定图片数量，只能等处理后再扣费
-            # 但我们可以先检查余额是否至少大于一个很小的值，防止空文件
-            if u['balance'] <= 0:
-                return render_template('upload.html', error='余额不足，请先充值', token=token)
+        if not is_vip_valid(uid) and u['balance'] <= 0:
+            return render_template('upload.html', error='余额不足，请先充值', token=token)
 
         # 保存上传的文件
         upload_path = os.path.join(UPLOAD_FOLDER, f"upload_{uid}_{int(time.time())}_{uuid.uuid4().hex[:6]}.zip")
@@ -280,37 +279,29 @@ def upload():
         if not output_zips:
             return render_template('upload.html', error='处理失败，请检查文件格式或内容', token=token)
 
-        # 统计图片总数（从输出ZIP中获取，或者重新计算）
-        # 更准确：从 process_zip_file 返回的图片数量，但我们现在简化：每个ZIP里的图片数量乘以ZIP数量
-        # 这里我们直接传入 group_size 和 len(output_zips) 来估算总图片数
+        # 统计图片总数
         total_images = 0
         for zpath in output_zips:
             with zipfile.ZipFile(zpath, 'r') as zf:
                 total_images += len([name for name in zf.namelist() if name.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.webp'))])
 
-        # 计算费用
         fee = total_images * PRICE_SPLIT
 
         # 检查余额并扣费
         if not is_vip_valid(uid):
             if u['balance'] < fee:
-                # 余额不足，删除已生成的ZIP，返回错误
                 for zpath in output_zips:
                     os.remove(zpath)
                 return render_template('upload.html', error=f'余额不足，需要 {fee:.4f} 元，当前余额 {u["balance"]:.4f} 元，请先充值', token=token)
             u['balance'] -= fee
             add_log(uid, f"网页图片分包ZIP｜每组{group_size}张", total_images, fee)
         else:
-            # VIP 免费
             fee = 0.0
 
-        # 生成下载链接
-        links = []
-        for zpath in output_zips:
-            filename = os.path.basename(zpath)
-            links.append(f'<a href="/download/{filename}">{filename}</a>')
-
-        result_html = '<br>'.join(links)
+        # 获取域名用于下载链接
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", os.getenv("PUBLIC_URL", request.host))
+        links = [f"https://{domain}/download/{os.path.basename(p)}" for p in output_zips]
+        result_html = '<br>'.join([f'<a href="{link}">{os.path.basename(p)}</a>' for link, p in zip(links, output_zips)])
 
         # 通过 Telegram 通知用户
         bot_msg = f"✅ 网页上传处理完成\n图片总数：{total_images}张\n分组：{len(output_zips)}个ZIP文件\n"
@@ -318,7 +309,7 @@ def upload():
             bot_msg += f"扣费：{fee:.4f}元\n剩余余额：{u['balance']:.4f}元\n"
         else:
             bot_msg += "VIP免费处理\n"
-        bot_msg += "下载链接：\n" + "\n".join([f"https://{request.host}/download/{os.path.basename(p)}" for p in output_zips])
+        bot_msg += "下载链接：\n" + "\n".join(links)
         safe_send_msg(uid, bot_msg)
 
         return render_template('upload.html', message=f'处理成功，共 {len(output_zips)} 个ZIP文件，下载链接已发送到您的 Telegram，也可以点击下载：<br>{result_html}', token=token)
@@ -365,19 +356,16 @@ def callback_handler(call):
     elif data == "web_upload":
         # 生成专属 token
         token = secrets.token_urlsafe(16)
-        user_web_tokens[token] = {
-            "uid": uid,
-            "expire": time.time() + WEB_TOKEN_EXPIRE
-        }
+        user_web_tokens[token] = {"uid": uid, "expire": time.time() + WEB_TOKEN_EXPIRE}
         # 清理过期 token
         for t, info in list(user_web_tokens.items()):
             if info['expire'] < time.time():
                 del user_web_tokens[t]
-        # 获取域名（从环境变量或请求中，这里用 Railway 自动分配的域名）
-        # 注意：需要在环境变量中设置 PUBLIC_URL，或者从 request.host 获取（但机器人无法直接获取）
-        # 简单方式：让用户自己拼接，或我们在环境变量中配置
-        public_url = os.getenv("PUBLIC_URL", "https://your-app.up.railway.app")
-        url = f"{public_url}/upload?token={token}"
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", os.getenv("PUBLIC_URL", ""))
+        if not domain:
+            safe_send_msg(cid, "❌无法获取域名，请管理员设置 PUBLIC_URL 环境变量")
+            return
+        url = f"https://{domain}/upload?token={token}"
         safe_send_msg(cid, f"🌐 您的专属网页上传链接（{WEB_TOKEN_EXPIRE//60}分钟内有效）：\n{url}\n\n上传完成后结果会自动发送给您")
 
     elif data == "user":
@@ -467,11 +455,10 @@ def handle_images(msg):
                 tmp_zip = os.path.join(UPLOAD_FOLDER, f"tg_{uid}_{int(time.time())}.zip")
                 with open(tmp_zip, 'wb') as f:
                     f.write(data)
-                # 处理并发送
                 output_zips = process_zip_file(tmp_zip, get_user(uid)['mode'], get_user(uid)['images_per_group'])
                 os.remove(tmp_zip)
                 if output_zips:
-                    # 扣费逻辑
+                    # 统计图片总数
                     total_images = 0
                     for zpath in output_zips:
                         with zipfile.ZipFile(zpath, 'r') as zf:
@@ -485,7 +472,7 @@ def handle_images(msg):
                             safe_send_msg(cid, f"❌余额不足，需要 {fee:.4f} 元")
                             return
                         u['balance'] -= fee
-                        add_log(uid, f"Telegram图片分包ZIP", total_images, fee)
+                        add_log(uid, "Telegram图片分包ZIP", total_images, fee)
                     for p in output_zips:
                         safe_send_document(cid, p)
                         os.remove(p)
@@ -511,7 +498,6 @@ def handle_images(msg):
             safe_send_msg(cid, "❌图片过多，建议打包ZIP上传或使用网页上传")
             return
 
-        # 单张图片或少量图片：直接打包成ZIP发送
         groups = [images_data[i:i+get_user(uid)['images_per_group']] for i in range(0, total, get_user(uid)['images_per_group'])]
         u = get_user(uid)
         fee = total * PRICE_SPLIT
@@ -658,6 +644,7 @@ def text_msg(msg):
 
 # ===================== 启动两个线程 =====================
 def run_flask():
+    print("Flask 线程启动中...")
     app.run(host="0.0.0.0", port=PORT, debug=False)
 
 def run_telegram():
@@ -665,10 +652,10 @@ def run_telegram():
     bot.infinity_polling()
 
 if __name__ == "__main__":
-    # 启动Flask线程
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
+    # 启动 Telegram 轮询线程（后台）
+    telegram_thread = threading.Thread(target=run_telegram)
+    telegram_thread.daemon = True
+    telegram_thread.start()
 
-    # 启动Telegram轮询（主线程）
-    run_telegram()
+    # 主线程运行 Flask，监听端口
+    run_flask()
