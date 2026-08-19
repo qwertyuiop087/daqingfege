@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片分包上传</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
+        input[type="file"] { margin: 15px 0; }
+        select, input[type="number"] { padding: 5px; margin: 5px 0; }
+        button { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        .error { color: red; }
+        .message { color: green; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>图片分包上传</h2>
+        {% if error %}
+            <p class="error">{{ error|safe }}</p>
+        {% endif %}
+        {% if message %}
+            <p class="message">{{ message|safe }}</p>
+        {% endif %}
+        <form method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="token" value="{{ token }}">
+            <label>选择ZIP文件（最大500MB）：</label><br>
+            <input type="file" name="file" accept=".zip" required><br>
+            <label>图片模式：</label>
+            <select name="mode">
+                <option value="original">原图</option>
+                <option value="compressed">压缩</option>
+            </select><br>
+            <label>每组图片数量：</label>
+            <input type="number" name="group_size" value="10" min="1" max="100" required><br>
+            <button type="submit">上传并分包</button>
+        </form>
+    </div>
+</body>
+</html>
